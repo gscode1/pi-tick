@@ -101,13 +101,3 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The cron backend's `register` no longer throws when `opts.logsDir`
   is omitted; it falls back to the default logs directory.
 
-## [0.1.0] - 2026-06-16
-
-### Added
-- Initial release of `pi-tick` (Pi Tick): persistent scheduled agent tasks for Pi on macOS, backed by launchd.
-- `pi-tick` sibling CLI with subcommands: `add`, `list`, `delete`, `enable`, `disable`, `run`, `log`, `help`.
-- `/tick list`, `/tick run <id>`, `/tick delete <id>` slash commands with argument completions.
-- LLM-callable tools: `tick_create`, `tick_list`, `tick_delete`.
-- Default-disabled job creation; opt in with `--enabled` on `add` or via `enable`.
-- Atomic catalog writes (`jobs.json`, mode 0600) and append-only run log (`runs.jsonl`, mode 0600).
-- Cross-platform test suite (`node --test`, 81 tests) and a macOS-only launchd integration smoke test.
