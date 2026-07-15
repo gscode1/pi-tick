@@ -1,0 +1,20 @@
+# Dependencies
+node_modules/
+
+# Lock file (libraries typically don't commit this; we use the system npm)
+package-lock.json
+
+# Build artifacts
+dist/
+*.tsbuildinfo
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+.pi/
+docs/
+.claude/
+.agent/

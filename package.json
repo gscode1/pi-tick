@@ -1,0 +1,53 @@
+{
+  "name": "pi-tick",
+  "version": "0.1.0",
+  "description": "Persistent scheduled agent tasks for Pi, backed by launchd (macOS) or cron (Linux).",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/gscode1/pi-tick.git"
+  },
+  "bugs": {
+    "url": "https://github.com/gscode1/pi-tick/issues"
+  },
+  "homepage": "https://github.com/gscode1/pi-tick#readme",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "pi-package",
+    "pi-coding-agent",
+    "scheduling",
+    "cron",
+    "launchd",
+    "agent"
+  ],
+  "pi": {
+    "extensions": [
+      "extensions/tick"
+    ]
+  },
+  "files": [
+    "extensions/",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "pretest": "test -d node_modules/typebox && test -d node_modules/@earendil-works || npm install --no-audit --no-fund --silent",
+    "test": "node --experimental-strip-types --test --test-reporter=spec test/store.test.ts test/list.test.ts test/pi-tick.test.ts test/extension.test.ts test/transcripts.test.ts test/cron-backend.test.ts test/catalog-lock.test.ts test/runner.test.ts",
+    "test:macos": "node --experimental-strip-types --test --test-reporter=spec test/launchd-integration.test.ts",
+    "sync": "node scripts/sync-cli.mjs"
+  },
+  "dependencies": {},
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-ai": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "typebox": "^1.2.16"
+  }
+}
