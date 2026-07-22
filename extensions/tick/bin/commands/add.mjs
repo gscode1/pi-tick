@@ -12,7 +12,8 @@
 import { ensureDataDirs, loadCatalog, saveCatalog, findJob, withCatalogLock } from "../catalog.mjs";
 import { parseFlags, flagString, flagOptionalU32 } from "../argv.mjs";
 import { fail } from "../errors.mjs";
-import { validateId, validatePrompt, validateCwd, buildSchedule, KIND_INTERVAL, KIND_DAILY, KIND_WEEKLY } from "../validate.mjs";
+import { validateId, validatePrompt, validateCwd } from "../validate.mjs";
+import { buildSchedule, KIND_INTERVAL, KIND_DAILY, KIND_WEEKLY } from "../schedule.mjs";
 import { cmdEnableInternal } from "./enable.mjs";
 
 // `scheduleOpts` is in the shape `buildSchedule` already consumes (the same

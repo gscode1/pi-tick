@@ -19,7 +19,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 
 import { logsDir as defaultLogsDir } from "../paths.mjs";
-import { resolveScheduleFields } from "../schedule-math.mjs";
+import { resolveScheduleFields } from "../schedule.mjs";
 
 const LABEL_PREFIX = "dev.pi.tick.";
 

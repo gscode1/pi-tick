@@ -204,6 +204,6 @@ export function saveConfig(cfg) {
 // general display formatters (formatLocal/durationSeconds/tailLines) used
 // to live here — this module's own scope had crept to "jobs CRUD + lock
 // + date math + formatters + file utilities". They now live in
-// schedule-math.mjs and format.mjs, which also retires the import-cycle
+// schedule.mjs and format.mjs, which also retires the import-cycle
 // workaround that used to keep formatters here so transcript-view.mjs
 // wouldn't have to depend on tick-core.mjs (issue #58).
