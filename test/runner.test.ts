@@ -1,6 +1,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { runJob, pruneTranscripts } from "../extensions/tick/bin/runner.mjs";
+import { loadCatalog, saveCatalog } from "../extensions/tick/bin/catalog.mjs";
 import { EventEmitter } from "node:events";
 import { mkdtempSync, rmSync, writeFileSync, readdirSync, statSync, readFileSync, mkdirSync, utimesSync } from "node:fs";
 import { join } from "node:path";
@@ -104,6 +105,42 @@ test("runJob - spawn_error", async () => {
   assert.equal(res.exitCode, 1);
   assert.equal(res.reason, "spawn_error");
   assert.equal(res.error, "spawn failed: ENOENT");
+});
+
+test("runJob records a synchronous spawn failure", async () => {
+  const job = { ...defaultJob, id: "sync-spawn-failure" };
+  saveCatalog({ version: 1, jobs: [job] });
+
+  const res = await runJob(job, "external", {
+    ...getDefaultOptions(),
+    spawnFn: () => { throw new Error("ENOENT"); },
+  });
+
+  assert.equal(res.exitCode, 1);
+  assert.equal(res.reason, "spawn_error");
+  assert.equal(res.transcriptPath && statSync(res.transcriptPath).isFile(), true);
+  const records = readFileSync(join(tempDir, "runs.jsonl"), "utf8").trim().split("\n").map(JSON.parse);
+  assert.ok(records.some(record => record.runId === res.runId && record.reason === "spawn_error"));
+  assert.equal(loadCatalog().jobs[0].lastRun.reason, "spawn_error");
+});
+
+test("runJob treats transcript setup failure as a failed run", async () => {
+  const blocked = join(tempDir, "not-a-directory");
+  writeFileSync(blocked, "x");
+  let child;
+  const res = await runJob(defaultJob, "external", {
+    ...getDefaultOptions(),
+    transcriptsDir: blocked,
+    spawnFn: () => {
+      child = createMockChild();
+      setTimeout(() => child.emit("close", 0, null), 10);
+      return child;
+    },
+  });
+
+  assert.equal(res.exitCode, 1);
+  assert.match(res.error, /^transcript write failed:/);
+  assert.equal(res.transcriptPath, null);
 });
 
 test("runJob - timeout", async () => {
