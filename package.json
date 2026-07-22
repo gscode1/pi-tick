@@ -1,6 +1,6 @@
 {
   "name": "pi-tick",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Persistent scheduled agent tasks for Pi, backed by launchd (macOS) or cron (Linux).",
   "repository": {
     "type": "git",

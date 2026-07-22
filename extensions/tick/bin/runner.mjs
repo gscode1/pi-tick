@@ -327,6 +327,7 @@ function buildRunRecord({
     reason = killReason;
     error = killReason;
   } else if (transcriptWriteError) {
+    exitCode = 1;
     reason = "exit_code";
     error = `transcript write failed: ${transcriptWriteError.message}`;
   } else if (signal) {
@@ -445,6 +446,7 @@ export async function runJob(job, trigger, options) {
 
   const childProgram = nodePath && existsSync(nodePath) ? nodePath : piPath;
   const childArgs = nodePath && existsSync(nodePath) ? [piPath, ...args] : args;
+  const triggerKind = trigger || "external";
 
   const env = { ...process.env, CONTEXT_MODE_BRIDGE_DEPTH: process.env.CONTEXT_MODE_BRIDGE_DEPTH || "1" };
   if (envPath) env.PATH = envPath;
@@ -461,20 +463,20 @@ export async function runJob(job, trigger, options) {
       detached: true,
     });
   } catch (err) {
-    clearActiveRun(job.id, runId);
-    if (transcriptStream) {
-      await new Promise(r => transcriptStream.end(r));
-    }
-    return {
-      exitCode: 1,
-      reason: "spawn_error",
-      error: `spawn failed: ${err.message}`,
-      startedAt,
-      finishedAt: new Date().toISOString(),
-      runId,
-      transcriptPath,
-      transcriptBytes: 0,
-    };
+    if (transcriptStream) await new Promise(r => transcriptStream.end(r));
+    const finishedAt = new Date().toISOString();
+    const existingTranscriptPath = transcriptPath && existsSync(transcriptPath) ? transcriptPath : null;
+    const record = buildRunRecord({
+      runId, jobId: job.id, triggerKind, startedAt, finishedAt,
+      spawnErr: err, stderrBuf: "", finalText: "", effectiveModel,
+      transcriptPath: existingTranscriptPath, transcriptBytes: existingTranscriptPath ? 0 : null,
+    });
+    try { appendJsonl(runsFile(), record); } catch { /* best effort */ }
+    try { ensureFileMode(runsFile(), 0o600); } catch { /* best effort */ }
+    await updateLastRunAndPrune(job.id, record, {
+      transcriptPath: existingTranscriptPath, finishedAt, transcriptsDir, logsDir, stderr,
+    });
+    return { ...record, transcriptPath: existingTranscriptPath, transcriptBytes: existingTranscriptPath ? 0 : null };
   }
 
   // Record the run as active only once the child actually exists. `pid`
@@ -494,7 +496,6 @@ export async function runJob(job, trigger, options) {
   // Issue #48 — trigger is always passed explicitly by callers now (cmdRun
   // reads --manual, not process.env). "external" only covers direct
   // runJob() callers (tests) that don't pass a trigger at all.
-  const triggerKind = trigger || "external";
   let stderrBuf = "";
   let spawnErr = null;
   let lineBuf = "";
