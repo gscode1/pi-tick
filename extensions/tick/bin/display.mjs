@@ -2,8 +2,7 @@
 // and transcripts subcommands. Display-only; owns no catalog or schedule
 // validation logic.
 
-import { KIND_INTERVAL, KIND_DAILY, KIND_WEEKLY } from "./validate.mjs";
-import { nextDailyAt, nextWeeklyAt } from "./schedule-math.mjs";
+import { KIND_INTERVAL, KIND_DAILY, KIND_WEEKLY, nextFireAt } from "./schedule.mjs";
 
 export function humanizeSeconds(total) {
   // ponytail: <60s stays in seconds; minute- and hour-scale only. No days,
@@ -34,26 +33,7 @@ export function formatSchedule(s) {
 }
 
 export function formatNextFire(s) {
-  const now = new Date();
-  if (s.kind === KIND_INTERVAL) {
-    const total = s.value.minutes * 60 + s.value.seconds;
-    // Defensive read; the offset is intentionally NOT applied to the
-    // display column — `formatNextFire` is a best-effort hint, the plist
-    // (the source of truth) is what launchd actually reads at bootstrap.
-    // Re-enabling a job rewrites the plist and shifts the phase; the
-    // display would silently disagree if we tried to model it here.
-    const _off = s.value.offset ?? { minutes: 0, seconds: 0 };
-    void _off;
-    const next = new Date(now.getTime() + total * 1000);
-    return next.toISOString();
-  }
-  if (s.kind === KIND_DAILY) {
-    return nextDailyAt(now, s.value.time);
-  }
-  if (s.kind === KIND_WEEKLY) {
-    return nextWeeklyAt(now, s.value.days, s.value.time);
-  }
-  return "--";
+  return nextFireAt(s);
 }
 
 export function printTable(rows, { stdout }) {

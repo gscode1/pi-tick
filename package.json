@@ -36,7 +36,7 @@
   ],
   "scripts": {
     "pretest": "test -d node_modules/typebox && test -d node_modules/@earendil-works || npm install --no-audit --no-fund --silent",
-    "test": "node --experimental-strip-types --test --test-reporter=spec test/store.test.ts test/list.test.ts test/pi-tick.test.ts test/extension.test.ts test/transcripts.test.ts test/cron-backend.test.ts test/catalog-lock.test.ts test/runner.test.ts",
+    "test": "node --experimental-strip-types --test --test-reporter=spec test/schedule.test.ts test/store.test.ts test/list.test.ts test/pi-tick.test.ts test/extension.test.ts test/transcripts.test.ts test/cron-backend.test.ts test/catalog-lock.test.ts test/runner.test.ts",
     "test:macos": "node --experimental-strip-types --test --test-reporter=spec test/launchd-integration.test.ts",
     "sync": "node scripts/sync-cli.mjs"
   },

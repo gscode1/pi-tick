@@ -28,11 +28,11 @@ import {
 import { join } from "node:path";
 
 import { logsDir as defaultLogsDir } from "../paths.mjs";
-import { resolveScheduleFields } from "../schedule-math.mjs";
+import { resolveScheduleFields } from "../schedule.mjs";
 
 // Cron weekday numbering is identical to launchd: Sun=0..Sat=6. Schedule
 // interpretation (hour/minute/weekdays/offset) is shared with the launchd
-// backend via resolveScheduleFields, in ../schedule-math.mjs.
+// backend via resolveScheduleFields, in ../schedule.mjs.
 
 const COMMENT_PREFIX = "# pi-tick: ";
 const MIN_INTERVAL_SECONDS = 60; // cron has 1-minute granularity

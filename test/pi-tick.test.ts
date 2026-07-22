@@ -4,7 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { parseFlags } from "../extensions/tick/bin/argv.mjs";
-import { validateId, validatePrompt, validateCwd, validateTime, validateInterval, buildSchedule, KIND_INTERVAL, KIND_DAILY, KIND_WEEKLY } from "../extensions/tick/bin/validate.mjs";
+import { validateId, validatePrompt, validateCwd } from "../extensions/tick/bin/validate.mjs";
 import { formatSchedule, formatNextFire } from "../extensions/tick/bin/display.mjs";
 import { augmentedPath } from "../extensions/tick/bin/bin-resolve.mjs";
 import { cmdAdd } from "../extensions/tick/bin/commands/add.mjs";
@@ -17,7 +17,6 @@ import { cmdKill } from "../extensions/tick/bin/commands/kill.mjs";
 import { cmdConfig } from "../extensions/tick/bin/commands/config.mjs";
 import { getActiveRun, isPidAlive, killActiveRun } from "../extensions/tick/bin/run-registry.mjs";
 import { loadConfig, saveConfig, PiTickError } from "../extensions/tick/bin/catalog.mjs";
-import { WEEKDAY_TO_INT } from "../extensions/tick/bin/schedule-math.mjs";
 import { configFile } from "../extensions/tick/bin/paths.mjs";
 import { extractStderrSignature, extractTaskflowFailure } from "../extensions/tick/bin/runner.mjs";
 import { launchdBackend, renderPlist } from "../extensions/tick/bin/backends/launchd.mjs";
@@ -171,47 +170,6 @@ test("validateCwd accepts an existing directory", () => {
   validateCwd(tmpdir());
 });
 
-test("validateTime accepts HH:MM and rejects bad values", () => {
-  validateTime("00:00");
-  validateTime("23:59");
-  assert.throws(() => validateTime("24:00"), /HH:MM/);
-  assert.throws(() => validateTime("9:00"), /HH:MM/);
-  assert.throws(() => validateTime("9:00am"), /HH:MM/);
-});
-
-test("validateInterval enforces minimum 5 seconds", () => {
-  assert.throws(() => validateInterval(0, 0), /requires/);
-  assert.throws(() => validateInterval(0, 4), /too short/);
-  const v = validateInterval(0, 5);
-  assert.deepEqual(v, { minutes: 0, seconds: 5, offset: { minutes: 0, seconds: 0 } });
-  const v2 = validateInterval(10, 30);
-  assert.deepEqual(v2, { minutes: 10, seconds: 30, offset: { minutes: 0, seconds: 0 } });
-});
-
-test("buildSchedule for daily returns { kind, value: { time } }", () => {
-  assert.deepEqual(buildSchedule("daily", { time: "09:00" }), {
-    kind: "daily",
-    value: { time: "09:00" },
-  });
-});
-
-test("buildSchedule for weekly normalizes days to lowercase", () => {
-  const s = buildSchedule("weekly", { days: "MON,Wed", time: "17:00" });
-  assert.equal(s.kind, "weekly");
-  assert.deepEqual(s.value, { days: ["mon", "wed"], time: "17:00" });
-});
-
-test("buildSchedule for interval validates total ≥ 5s", () => {
-  assert.throws(() => buildSchedule("interval", { minutes: 0, seconds: 4 }), /too short/);
-  const s = buildSchedule("interval", { minutes: 1, seconds: 0 });
-  assert.equal(s.kind, "interval");
-  assert.deepEqual(s.value, { minutes: 1, seconds: 0, offset: { minutes: 0, seconds: 0 } });
-});
-
-test("buildSchedule rejects unknown kind", () => {
-  assert.throws(() => buildSchedule("monthly", {}), /--kind/);
-});
-
 // ─── Plist render ─────────────────────────────────────────────────────────
 
 test("renderPlist: daily schedule has StartCalendarInterval dict with Hour/Minute", () => {
@@ -292,48 +250,6 @@ test("augmentedPath: a minimal launchd PATH gains the tool dirs it was missing",
 });
 
 // ─── Interval offset (issue 22) ──────────────────────────────────────────
-
-test("validateInterval accepts offset fields and returns them on the value", () => {
-  const v = validateInterval(2, 0, 15, 30);
-  assert.deepEqual(v, { minutes: 2, seconds: 0, offset: { minutes: 15, seconds: 30 } });
-  const v0 = validateInterval(2, 0, 0, 0);
-  assert.deepEqual(v0, { minutes: 2, seconds: 0, offset: { minutes: 0, seconds: 0 } });
-  // Bare flag (parseFlags returns `true`) is rejected with a clear
-  // message — not silently coerced to 1.
-  assert.throws(() => validateInterval(2, 0, true, 0), /--offset-minutes requires a value/);
-  assert.throws(() => validateInterval(2, 0, 0, true), /--offset-seconds requires a value/);
-});
-
-test("validateInterval rejects negative or non-integer offset", () => {
-  assert.throws(() => validateInterval(2, 0, -1, 0), /--offset-minutes/);
-  assert.throws(() => validateInterval(2, 0, 0, -1), /--offset-seconds/);
-  assert.throws(() => validateInterval(2, 0, 1.5, 0), /--offset-minutes/);
-  assert.throws(() => validateInterval(2, 0, 0, 1.5), /--offset-seconds/);
-});
-
-test("buildSchedule interval passes offset through to validateInterval", () => {
-  const s = buildSchedule("interval", {
-    minutes: 2,
-    seconds: 0,
-    "offset-minutes": 15,
-    "offset-seconds": 0,
-  });
-  assert.equal(s.kind, "interval");
-  assert.deepEqual(s.value, { minutes: 2, seconds: 0, offset: { minutes: 15, seconds: 0 } });
-});
-
-test("parseFlags: bare --offset-minutes yields boolean true and build rejects it", () => {
-  const bare = parseFlags(["--offset-minutes"]);
-  assert.equal(bare["offset-minutes"], true);
-  const absent = parseFlags(["--minutes", "5"]);
-  assert.equal(absent["offset-minutes"], undefined);
-  assert.throws(
-    () => buildSchedule("interval", { minutes: 5, seconds: 0, "offset-minutes": true }),
-    /--offset-minutes requires a value/,
-  );
-  const sAbsent = buildSchedule("interval", { minutes: 5, seconds: 0 });
-  assert.deepEqual(sAbsent.value.offset, { minutes: 0, seconds: 0 });
-});
 
 test("renderPlist: interval with offset adds StartCalendarInterval for wall-clock first fire", () => {
   // Compute the expected wall-clock target = now + offset. renderPlist
@@ -602,16 +518,6 @@ test("renderPlist: XML-escapes special characters", () => {
   assert.match(plist, /&lt;weird&gt;/);
   assert.match(plist, /&amp;/);
   assert.match(plist, /&quot;quoted&quot;/);
-});
-
-test("WEEKDAY_TO_INT matches Apple launchd.plist (Sunday=0..Saturday=6)", () => {
-  assert.equal(WEEKDAY_TO_INT.sunday, 0);
-  assert.equal(WEEKDAY_TO_INT.monday, 1);
-  assert.equal(WEEKDAY_TO_INT.tuesday, 2);
-  assert.equal(WEEKDAY_TO_INT.wednesday, 3);
-  assert.equal(WEEKDAY_TO_INT.thursday, 4);
-  assert.equal(WEEKDAY_TO_INT.friday, 5);
-  assert.equal(WEEKDAY_TO_INT.saturday, 6);
 });
 
 // ─── cmdAdd / cmdList / cmdDelete (disabled) ─────────────────────────────
