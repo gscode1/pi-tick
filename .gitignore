@@ -1,9 +1,6 @@
 # Dependencies
 node_modules/
 
-# Lock file (libraries typically don't commit this; we use the system npm)
-package-lock.json
-
 # Build artifacts
 dist/
 *.tsbuildinfo
