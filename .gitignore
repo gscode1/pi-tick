@@ -15,3 +15,4 @@ dist/
 docs/
 .claude/
 .agent/
+AGENTS.md
