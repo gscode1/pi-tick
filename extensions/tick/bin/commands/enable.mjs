@@ -8,12 +8,19 @@ import { parseFlags } from "../argv.mjs";
 import { fail } from "../errors.mjs";
 import { resolveNodePath, resolvePiPath, augmentedPath } from "../bin-resolve.mjs";
 import { activeBackend } from "../backend-info.mjs";
+import { KIND_ONCE, validateOnceAt } from "../schedule.mjs";
 
 export async function cmdEnableInternal(id, { skipCatalogExistsCheck = false, stdout = process.stdout, stderr = process.stderr } = {}) {
   ensureDataDirs();
   const pre = loadCatalog();
   const preJob = findJob(pre, id);
   if (!preJob) fail(`no such job: ${id}`, 4);
+  if (preJob.schedule?.kind === KIND_ONCE) {
+    if (preJob.onceConsumedAt) fail(`job '${id}' has already been consumed`, 2);
+    // A disabled one-shot can outlive its requested time. Revalidate before
+    // touching the backend so enabling it can never register a stale fire.
+    validateOnceAt(preJob.schedule.value?.at);
+  }
 
   // Validate that the stable script path exists; if not, the session_start
   // sync hasn't run yet.
