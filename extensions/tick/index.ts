@@ -359,17 +359,18 @@ export default function (pi: ExtensionAPI): void {
     name: "tick_create",
     label: "Create Scheduled Job",
     description:
-      "Create a scheduled agent job. The job is disabled by default; pass enabled=true to also register a launchd plist in the same call.",
-    promptSnippet: "Schedule a prompt to run on a recurring schedule (daily/weekly/interval).",
+      "Create a scheduled agent job. Jobs may recur (interval/daily/weekly) or run once at an absolute ISO-8601 timestamp. Jobs are disabled by default; pass enabled=true to register the schedule in the same call.",
+    promptSnippet: "Schedule a prompt to run once or on a recurring schedule.",
     promptGuidelines: [
-      "Use tick_create to schedule a recurring prompt. Pass enabled=true to also enable scheduling; otherwise the job is a draft and must be enabled separately via the CLI.",
+      "Use scheduleKind=once with scheduleValue.at for a one-shot prompt. The timestamp must be absolute ISO-8601, minute precision, and in the future.",
+      "Use tick_create to schedule a recurring prompt with interval, daily, or weekly, or a one-shot prompt with once and scheduleValue.at. Pass enabled=true to also enable scheduling; otherwise the job is a draft and must be enabled separately via the CLI.",
       "Use tick_list to inspect existing jobs before creating a new one with the same id.",
     ],
     parameters: Type.Object({
       jobId: Type.String({ description: "Job id; matches /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/" }),
       prompt: Type.String({ description: "The prompt to run on each fire (≤ 16KB)" }),
       cwd: Type.String({ description: "Absolute path to the working directory" }),
-      scheduleKind: StringEnum(["interval", "daily", "weekly"] as const),
+      scheduleKind: StringEnum(["interval", "daily", "weekly", "once"] as const),
       scheduleValue: Type.Object({
         minutes: Type.Optional(Type.Number({ description: "interval: minutes (≥0)" })),
         seconds: Type.Optional(Type.Number({ description: "interval: seconds (≥0); interval must total ≥ 5s" })),
@@ -377,8 +378,9 @@ export default function (pi: ExtensionAPI): void {
         offsetSeconds: Type.Optional(Type.Number({ description: "interval: optional phase offset in seconds (≥0); not honored by the cron backend" })),
         time: Type.Optional(Type.String({ description: "daily/weekly: HH:MM in 24h format" })),
         days: Type.Optional(Type.Array(Type.String(), { description: "weekly: list of weekday names (monday, tuesday, ...)" })),
+        at: Type.Optional(Type.String({ description: "once: absolute ISO-8601 timestamp, minute precision, and in the future" })),
       }),
-      enabled: Type.Optional(Type.Boolean({ description: "If true, register launchd plist in the same call" })),
+      enabled: Type.Optional(Type.Boolean({ description: "If true, register the schedule with the active backend in the same call" })),
       model: Type.Optional(Type.String({ description: "Optional model id (passed to pi as --model)" })),
       timeoutMs: Type.Optional(Type.Number({ description: "Wall-clock timeout in ms; SIGTERM then SIGKILL after killGraceMs. Default 30m." })),
       idleTimeoutMs: Type.Optional(Type.Number({ description: "No-stdout/no-stderr cap in ms; SIGTERM when reached. 0 = disabled. Default 0." })),

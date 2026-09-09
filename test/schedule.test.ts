@@ -11,6 +11,7 @@ import {
   buildSchedule,
   resolveScheduleFields,
   nextFireAt,
+  validateOnceAt,
   WEEKDAY_TO_INT,
 } from "../extensions/tick/bin/schedule.mjs";
 
@@ -26,6 +27,7 @@ test("validateKind accepts valid kinds and rejects invalid kind", () => {
   validateKind("interval");
   validateKind("daily");
   validateKind("weekly");
+  validateKind("once");
   assert.throws(() => validateKind("monthly"), /invalid --kind/);
 });
 
@@ -59,6 +61,23 @@ test("validateInterval rejects negative or non-integer offset", () => {
   assert.throws(() => validateInterval(2, 0, 0, -1), /--offset-seconds/);
   assert.throws(() => validateInterval(2, 0, 1.5, 0), /--offset-minutes/);
   assert.throws(() => validateInterval(2, 0, 0, 1.5), /--offset-seconds/);
+});
+
+test("validateOnceAt accepts future minute timestamps and rejects invalid forms", () => {
+  const now = new Date("2026-01-01T00:00:00.000Z");
+  assert.equal(validateOnceAt("2026-01-01T00:05:00Z", { now }), "2026-01-01T00:05:00.000Z");
+  assert.throws(() => validateOnceAt("2026-01-01T00:00:30Z", { now }), /minute precision/);
+  assert.throws(() => validateOnceAt("2026-01-01T00:00:00.123Z", { now }), /minute precision/);
+  assert.throws(() => validateOnceAt("2026-01-01T00:00:00Z", { now }), /future/);
+  assert.throws(() => validateOnceAt("2026-02-30T00:05:00Z", { now }), /valid ISO/);
+  assert.throws(() => validateOnceAt("2026-01-01T00:05:00", { now }), /absolute ISO/);
+});
+
+test("buildSchedule for once normalizes the timestamp", () => {
+  assert.deepEqual(buildSchedule("once", { at: "2099-01-01T01:05:00+01:00" }), {
+    kind: "once",
+    value: { at: "2099-01-01T00:05:00.000Z" },
+  });
 });
 
 test("buildSchedule for daily returns { kind, value: { time } }", () => {
@@ -160,6 +179,23 @@ test("resolveScheduleFields normalizes interval, daily, and weekly schedules", (
     weekdays: null,
   });
 
+  const once = resolveScheduleFields({
+    kind: "once",
+    value: { at: "2026-07-22T15:30:00.000Z" },
+  });
+  const localOnce = new Date("2026-07-22T15:30:00.000Z");
+  assert.deepEqual(once, {
+    kind: "once",
+    year: localOnce.getFullYear(),
+    month: localOnce.getMonth() + 1,
+    day: localOnce.getDate(),
+    hour: localOnce.getHours(),
+    minute: localOnce.getMinutes(),
+    totalSeconds: null,
+    offsetSeconds: 0,
+    weekdays: null,
+  });
+
   const weekly = resolveScheduleFields({
     kind: "weekly",
     value: { days: ["friday", "monday"], time: "08:15" },
@@ -190,6 +226,9 @@ test("nextFireAt computes expected timestamps for all kinds including old interv
   const dDaily = new Date(nextDailyLater);
   assert.equal(dDaily.getHours(), 15);
   assert.equal(dDaily.getMinutes(), 0);
+
+  const nextOnce = nextFireAt({ kind: "once", value: { at: "2026-07-23T15:30:00.000Z" } }, now);
+  assert.equal(nextOnce, "2026-07-23T15:30:00.000Z");
 
   // Weekly
   const nextWeekly = nextFireAt({ kind: "weekly", value: { days: ["wednesday"], time: "12:00" } }, now);

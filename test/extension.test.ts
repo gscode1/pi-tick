@@ -242,6 +242,26 @@ test("extension: tick_create for interval persists the job to the catalog", asyn
   });
 });
 
+test("extension: tick_create for once persists the absolute timestamp and consumption guard", async () => {
+  await withCatalog([], async (_env, dataDir) => {
+    const ext = await loadExtension();
+    const fake = makeFakePi();
+    ext.default(fake as any);
+    const tool = fake.tools.get("tick_create")!;
+    const result = await tool.execute!("c1", {
+      jobId: "once", prompt: "once", cwd: "/tmp",
+      scheduleKind: "once",
+      scheduleValue: { at: "2099-01-01T00:05:00Z" },
+    });
+    assert.notEqual(result.isError, true);
+    const job = readCatalog(dataDir).jobs.find((j) => j.id === "once");
+    assert.equal(job.schedule.kind, "once");
+    assert.equal(job.schedule.value.at, "2099-01-01T00:05:00.000Z");
+    assert.equal(job.onceConsumedAt, null);
+    assert.equal(job.enabled, false);
+  });
+});
+
 test("extension: tick_create for weekly persists schedule (and stays a draft)", async () => {
   await withCatalog([], async (_env, dataDir) => {
     const ext = await loadExtension();

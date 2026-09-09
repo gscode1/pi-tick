@@ -2,7 +2,7 @@
 // and transcripts subcommands. Display-only; owns no catalog or schedule
 // validation logic.
 
-import { KIND_INTERVAL, KIND_DAILY, KIND_WEEKLY, nextFireAt } from "./schedule.mjs";
+import { KIND_INTERVAL, KIND_DAILY, KIND_WEEKLY, KIND_ONCE, nextFireAt } from "./schedule.mjs";
 
 export function humanizeSeconds(total) {
   // ponytail: <60s stays in seconds; minute- and hour-scale only. No days,
@@ -29,6 +29,7 @@ export function formatSchedule(s) {
   }
   if (s.kind === KIND_DAILY) return `daily @ ${s.value.time}`;
   if (s.kind === KIND_WEEKLY) return `weekly ${s.value.days.join(",")} @ ${s.value.time}`;
+  if (s.kind === KIND_ONCE) return `once @ ${s.value.at}`;
   return "?";
 }
 

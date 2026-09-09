@@ -99,6 +99,8 @@ export function renderPlist(job, opts) {
       .map((wd) => `  <dict>\n    <key>Weekday</key>\n    <integer>${wd}</integer>\n    <key>Hour</key>\n    <integer>${fields.hour}</integer>\n    <key>Minute</key>\n    <integer>${fields.minute}</integer>\n  </dict>`)
       .join("\n");
     scheduleKeys = `  <key>StartCalendarInterval</key>\n  <array>\n${entries}\n  </array>\n`;
+  } else if (job.schedule.kind === "once") {
+    scheduleKeys = `  <key>StartCalendarInterval</key>\n  <dict>\n    <key>Month</key>\n    <integer>${fields.month}</integer>\n    <key>Day</key>\n    <integer>${fields.day}</integer>\n    <key>Hour</key>\n    <integer>${fields.hour}</integer>\n    <key>Minute</key>\n    <integer>${fields.minute}</integer>\n  </dict>\n`;
   }
 
   return `<?xml version="1.0" encoding="UTF-8"?>

@@ -59,6 +59,16 @@ const FAKE_CLI = "/opt/pi-tick/pi-tick.mjs";
 // Defensive read: an old-shape value (no `offset` key) must still
 // produce a valid crontab line — the no-offset case is the same as a
 // present 0/0 offset.
+test("buildCronLine: once renders minute, hour, day, and month fields", () => {
+  const out = buildCronLine(
+    { id: "once", schedule: { kind: "once", value: { at: "2099-07-22T15:30:00.000Z" } } },
+    { nodePath: FAKE_NODE, cliPath: FAKE_CLI, logsDir: () => FAKE_LOGS },
+  );
+  assert.ok(!out.error, out.error);
+  const local = new Date("2099-07-22T15:30:00.000Z");
+  assert.match(out.line, new RegExp(`^30 ${local.getHours()} 22 7 \\* `));
+});
+
 test("buildCronLine: interval with old-shape value (no offset key) still works", () => {
   const out = buildCronLine(
     { id: "j1", schedule: { kind: "interval", value: { minutes: 2, seconds: 0 } } },

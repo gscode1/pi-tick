@@ -82,6 +82,9 @@ export function buildCronLine(job, opts) {
     }
     const fields = resolveScheduleFields(s);
     schedule = `${fields.minute} ${fields.hour} * * ${fields.weekdays.join(",")}`;
+  } else if (s.kind === "once") {
+    const fields = resolveScheduleFields(s);
+    schedule = `${fields.minute} ${fields.hour} ${fields.day} ${fields.month} *`;
   } else {
     return { error: `unknown schedule kind: ${s.kind}` };
   }
