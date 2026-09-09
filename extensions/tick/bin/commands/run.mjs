@@ -2,12 +2,13 @@
 // a subprocess (`node pi-tick.mjs run <id>`) or in-process by the extension.
 
 import { existsSync } from "node:fs";
-import { ensureDataDirs, loadCatalog, findJob, loadConfig } from "../catalog.mjs";
+import { ensureDataDirs, loadCatalog, findJob, loadConfig, claimOnceJob } from "../catalog.mjs";
 import { transcriptsDir, logsDir } from "../paths.mjs";
 import { parseFlags } from "../argv.mjs";
 import { fail } from "../errors.mjs";
 import { resolvePiPath, resolveNodePath, augmentedPath } from "../bin-resolve.mjs";
 import { runJob } from "../runner.mjs";
+import { activeBackend } from "../backend-info.mjs";
 
 export async function cmdRun(argv, { stdout = process.stdout, stderr = process.stderr } = {}) {
   const flags = parseFlags(argv);
@@ -17,11 +18,15 @@ export async function cmdRun(argv, { stdout = process.stdout, stderr = process.s
 
   ensureDataDirs();
   const catalog = loadCatalog();
-  const job = findJob(catalog, id);
+  let job = findJob(catalog, id);
   if (!job) {
     stderr.write(`pi-tick: no such job: ${id}\n`);
     return 4;
   }
+
+  // Trigger kind comes from an explicit --manual flag, not process.env
+  // (issue #48). Manual runs never consume a one-shot schedule.
+  const trigger = (flags.manual === true || flags.manual === "true") ? "manual" : "external";
 
   if (!job.enabled) {
     stderr.write(`pi-tick: job '${id}' is disabled; not running\n`);
@@ -47,11 +52,23 @@ export async function cmdRun(argv, { stdout = process.stdout, stderr = process.s
     nodeBinary = resolveNodePath();
   }
 
-  // Trigger kind comes from an explicit --manual flag, not process.env
-  // (issue #48). Threading it through the options bag instead of an
-  // ambient global removes the race where a concurrent in-process call
-  // could observe another call's temporarily-overridden env var.
-  const trigger = (flags.manual === true || flags.manual === "true") ? "manual" : "external";
+  // Claim only after all pre-run validation succeeds. A failed validation
+  // must leave the one-shot available for a later scheduled invocation.
+  if (trigger === "external" && job.schedule?.kind === "once") {
+    const claimed = await claimOnceJob(id);
+    if (!claimed) return 0;
+    job = claimed;
+    // Correctness does not depend on unregister succeeding: onceConsumedAt
+    // is already durable. This is best-effort cleanup of the stale calendar
+    // registration.
+    try {
+      const unregister = await activeBackend().unregister(id);
+      if (!unregister.ok) stderr.write(`pi-tick: could not unregister one-shot '${id}': ${unregister.error}\n`);
+    } catch (err) {
+      stderr.write(`pi-tick: could not unregister one-shot '${id}': ${err.message}\n`);
+    }
+  }
+
   const result = await runJob(job, trigger, {
     nodePath: nodeBinary,
     piPath: piBinary,

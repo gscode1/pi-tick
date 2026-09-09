@@ -172,6 +172,16 @@ test("validateCwd accepts an existing directory", () => {
 
 // ─── Plist render ─────────────────────────────────────────────────────────
 
+test("renderPlist: once schedule has local Month/Day/Hour/Minute calendar fields", () => {
+  const job = { id: "once", cwd: "/tmp", schedule: { kind: "once", value: { at: "2099-07-22T15:30:00.000Z" } } };
+  const plist = renderPlist(job, { nodePath: "/usr/local/bin/node", cliPath: "/stable/cli.mjs" });
+  assert.match(plist, /<key>Month<\/key>\s*<integer>7<\/integer>/);
+  assert.match(plist, /<key>Day<\/key>\s*<integer>22<\/integer>/);
+  const local = new Date("2099-07-22T15:30:00.000Z");
+  assert.match(plist, new RegExp(`<key>Hour</key>\\s*<integer>${local.getHours()}</integer>`));
+  assert.match(plist, /<key>Minute<\/key>\s*<integer>30<\/integer>/);
+});
+
 test("renderPlist: daily schedule has StartCalendarInterval dict with Hour/Minute", () => {
   const job = makeJob({ id: "daily-job", scheduleKind: "daily", scheduleValue: { time: "09:00" } });
   const plist = renderPlist(job, { nodePath: "/usr/local/bin/node", cliPath: "/stable/cli.mjs" });
@@ -1072,6 +1082,40 @@ test("cmdRun with a happy-path mock pi spawns the right argv and writes a RunRec
         assert.ok(cat2.jobs[0].lastRun);
         assert.equal(cat2.jobs[0].lastRun.exitCode, 0);
       });
+    } finally {
+      teardownEnv(env);
+    }
+  });
+});
+
+test("cmdRun manually runs a once job without consuming it, then external execution consumes it once", async () => {
+  await withTempDir(async (dir) => {
+    const env = setupEnv({ dataDir: dir, plistDir: join(dir, "agents") });
+    const piStub = writeStub(env, "pi", mockPi());
+    const launchctlStub = writeStub(env, "launchctl", "exit 0");
+    try {
+      const catMod = await import(new URL("../extensions/tick/bin/catalog.mjs", import.meta.url).pathname);
+      await withEnv(env, () => {
+        const cat = catMod.loadCatalog();
+        cat.jobs.push({
+          id: "once", prompt: "do thing", cwd: dir,
+          schedule: { kind: "once", value: { at: "2099-01-01T00:05:00.000Z" } },
+          enabled: true, onceConsumedAt: null, model: null, piPath: piStub,
+          createdAt: "x", updatedAt: "x", lastRun: null,
+        });
+        catMod.saveCatalog(cat);
+      });
+      const io = { stdout: process.stdout as any, stderr: process.stderr as any };
+      const launchEnv = { ...env, PI_TICK_BACKEND: "launchd", PI_TICK_LAUNCHCTL: launchctlStub };
+      assert.equal(await withEnv(launchEnv, () => cmdRun(["once", "--manual"], io)), 0);
+      assert.equal(await withEnv(launchEnv, () => catMod.loadCatalog().jobs[0].enabled), true);
+      assert.equal(await withEnv(launchEnv, () => cmdRun(["once"], io)), 0);
+      const consumed = await withEnv(launchEnv, () => catMod.loadCatalog());
+      assert.equal(consumed.jobs[0].enabled, false);
+      assert.match(consumed.jobs[0].onceConsumedAt, /^20/);
+      assert.equal(await withEnv(launchEnv, () => cmdRun(["once"], io)), 0);
+      const runs = readFileSync(join(dir, "runs.jsonl"), "utf8").trim().split("\n").filter(Boolean);
+      assert.equal(runs.length, 2);
     } finally {
       teardownEnv(env);
     }

@@ -12,6 +12,10 @@ import {
   withCatalogLock,
   catalogLockPath,
   PiTickError,
+  ensureDataDirs,
+  loadCatalog,
+  saveCatalog,
+  claimOnceJob,
 } from "../extensions/tick/bin/catalog.mjs";
 import { withTempDir, setupEnv, withEnv, teardownEnv, fileMode } from "./_helpers.ts";
 import { join } from "node:path";
@@ -27,6 +31,25 @@ import {
 } from "node:fs";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+
+test("claimOnceJob atomically consumes an enabled once job", async () => {
+  await withTempDir(async (dir) => {
+    const env = setupEnv({ dataDir: dir, plistDir: join(dir, "agents") });
+    await withEnv(env, async () => {
+      ensureDataDirs();
+      saveCatalog({ version: 1, jobs: [{
+        id: "once", enabled: true, onceConsumedAt: null,
+        schedule: { kind: "once", value: { at: "2099-01-01T00:05:00.000Z" } },
+      }] });
+      const [first, second] = await Promise.all([claimOnceJob("once"), claimOnceJob("once")]);
+      assert.equal([first, second].filter(Boolean).length, 1);
+      const job = loadCatalog().jobs[0];
+      assert.equal(job.enabled, false);
+      assert.match(job.onceConsumedAt, /^20/);
+    });
+    teardownEnv(env);
+  });
+});
 
 // Build an env suitable for spawning a child that can import the CLI.
 function buildChildEnv(env: { [k: string]: string }): NodeJS.ProcessEnv {
