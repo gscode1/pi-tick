@@ -68,6 +68,9 @@ test("validateOnceAt accepts future minute timestamps and rejects invalid forms"
   assert.equal(validateOnceAt("2026-01-01T00:05:00Z", { now }), "2026-01-01T00:05:00.000Z");
   assert.throws(() => validateOnceAt("2026-01-01T00:00:30Z", { now }), /minute precision/);
   assert.throws(() => validateOnceAt("2026-01-01T00:00:00.123Z", { now }), /minute precision/);
+  // The stored (normalized) form must re-validate, since `enable` re-checks it.
+  const stored = validateOnceAt("2026-01-01T00:05:00Z", { now });
+  assert.equal(validateOnceAt(stored, { now }), stored);
   assert.throws(() => validateOnceAt("2026-01-01T00:00:00Z", { now }), /future/);
   assert.throws(() => validateOnceAt("2026-02-30T00:05:00Z", { now }), /valid ISO/);
   assert.throws(() => validateOnceAt("2026-01-01T00:05:00", { now }), /absolute ISO/);

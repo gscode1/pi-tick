@@ -1122,6 +1122,40 @@ test("cmdRun manually runs a once job without consuming it, then external execut
   });
 });
 
+test("cmdRun unregisters a once job only after the run is recorded (bootout kills the job's own process under launchd)", async () => {
+  await withTempDir(async (dir) => {
+    const env = setupEnv({ dataDir: dir, plistDir: join(dir, "agents") });
+    const piStub = writeStub(env, "pi", mockPi());
+    // On bootout, record how many runs were already persisted and whether the
+    // active plist still existed.
+    const probe = join(dir, "bootout-probe.txt");
+    const plist = join(dir, "agents", "dev.pi.tick.once.plist");
+    const launchctlStub = writeStub(env, "launchctl",
+      `if [ "$1" = bootout ]; then echo "runs=$(wc -l < "${join(dir, "runs.jsonl")}" | tr -d ' ') plist=$([ -e "${plist}" ] && echo present || echo renamed)" >> "${probe}"; fi\nexit 0`);
+    try {
+      const catMod = await import(new URL("../extensions/tick/bin/catalog.mjs", import.meta.url).pathname);
+      await withEnv(env, () => {
+        const cat = catMod.loadCatalog();
+        cat.jobs.push({
+          id: "once", prompt: "do thing", cwd: dir,
+          schedule: { kind: "once", value: { at: "2099-01-01T00:05:00.000Z" } },
+          enabled: true, onceConsumedAt: null, model: null, piPath: piStub,
+          createdAt: "x", updatedAt: "x", lastRun: null,
+        });
+        catMod.saveCatalog(cat);
+      });
+      mkdirSync(join(dir, "agents"), { recursive: true });
+      writeFileSync(plist, "<plist/>");
+      const io = { stdout: process.stdout as any, stderr: process.stderr as any };
+      const launchEnv = { ...env, PI_TICK_BACKEND: "launchd", PI_TICK_LAUNCHCTL: launchctlStub };
+      assert.equal(await withEnv(launchEnv, () => cmdRun(["once"], io)), 0);
+      assert.equal(readFileSync(probe, "utf8").trim(), "runs=1 plist=renamed");
+    } finally {
+      teardownEnv(env);
+    }
+  });
+});
+
 test("cmdRun sends slash-command jobs through RPC instead of print mode", async () => {
   await withTempDir(async (dir) => {
     const env = setupEnv({ dataDir: dir, plistDir: join(dir, "agents") });

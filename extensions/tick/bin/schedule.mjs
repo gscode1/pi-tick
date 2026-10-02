@@ -21,10 +21,10 @@ export const VALID_KINDS = [KIND_INTERVAL, KIND_DAILY, KIND_WEEKLY, KIND_ONCE];
 // One-shot timestamps intentionally use minute precision. Both supported
 // backends render calendar fields and cannot provide portable sub-minute
 // scheduling semantics.
-export const ONCE_ISO_REGEX = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:00(?:Z|[+-]\d{2}:\d{2})$/;
+export const ONCE_ISO_REGEX = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:00(?:\.000)?(?:Z|[+-]\d{2}:\d{2})$/;
 
 export function validateOnceAt(at, { now = new Date() } = {}) {
-  const match = typeof at === "string" && at.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):00(Z|([+-])(\d{2}):(\d{2}))$/);
+  const match = typeof at === "string" && at.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):00(?:\.000)?(Z|([+-])(\d{2}):(\d{2}))$/);
   if (!match) {
     fail(`invalid --at '${String(at)}': must be an absolute ISO-8601 timestamp with minute precision (seconds must be 00)`, 2);
   }

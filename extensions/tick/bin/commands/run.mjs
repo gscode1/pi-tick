@@ -54,19 +54,12 @@ export async function cmdRun(argv, { stdout = process.stdout, stderr = process.s
 
   // Claim only after all pre-run validation succeeds. A failed validation
   // must leave the one-shot available for a later scheduled invocation.
+  let claimedOnce = false;
   if (trigger === "external" && job.schedule?.kind === "once") {
     const claimed = await claimOnceJob(id);
     if (!claimed) return 0;
     job = claimed;
-    // Correctness does not depend on unregister succeeding: onceConsumedAt
-    // is already durable. This is best-effort cleanup of the stale calendar
-    // registration.
-    try {
-      const unregister = await activeBackend().unregister(id);
-      if (!unregister.ok) stderr.write(`pi-tick: could not unregister one-shot '${id}': ${unregister.error}\n`);
-    } catch (err) {
-      stderr.write(`pi-tick: could not unregister one-shot '${id}': ${err.message}\n`);
-    }
+    claimedOnce = true;
   }
 
   const result = await runJob(job, trigger, {
@@ -78,5 +71,19 @@ export async function cmdRun(argv, { stdout = process.stdout, stderr = process.s
     defaultModel: loadConfig().defaultModel,
     stderr
   });
+
+  // Unregister only after the run has finished and been recorded. Under
+  // launchd, `bootout` terminates the job's own process, so doing it before
+  // runJob kills Pi before it starts. Correctness does not depend on this
+  // succeeding: onceConsumedAt is already durable, so a stale calendar entry
+  // can never run the prompt again. This is best-effort cleanup.
+  if (claimedOnce) {
+    try {
+      const unregister = await activeBackend().unregister(id);
+      if (!unregister.ok) stderr.write(`pi-tick: could not unregister one-shot '${id}': ${unregister.error}\n`);
+    } catch (err) {
+      stderr.write(`pi-tick: could not unregister one-shot '${id}': ${err.message}\n`);
+    }
+  }
   return result.exitCode;
 }
