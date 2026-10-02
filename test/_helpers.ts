@@ -56,6 +56,16 @@ export function setupEnv(opts: {
   // Without this, stubs that try to truncate a file via `rm -f` would
   // silently fail and the file would just get appended to.
   const systemPath = "/usr/bin:/bin";
+  // Isolated runs must not find a real `node`: the runner executes pi as
+  // `node <pi>` whenever resolveNodePath() finds one, and the pi stubs are
+  // shell scripts. resolveNodePath() falls back to /usr/local/bin/node and
+  // /opt/homebrew/bin/node, which exist on Linux and CI. A pass-through shim
+  // earlier on PATH wins over those fallbacks and just execs the stub.
+  if (opts.isolatedPath !== false && opts.pathPrepend === undefined) {
+    const shim = join(stubDir, "node");
+    writeFileSync(shim, "#!/bin/sh\nexec \"$@\"\n", { mode: 0o755 });
+    chmodSync(shim, 0o755);
+  }
   return {
     HOME: opts.home ?? tmpDir,
     PI_TICK_DATA_DIR: opts.dataDir,
