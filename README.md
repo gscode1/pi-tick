@@ -221,11 +221,11 @@ automatically.
 A one-shot job uses an absolute ISO-8601 timestamp and minute precision:
 
 ```sh
-pi-tick add reminder \\
-  --prompt "Do the thing" \\
-  --cwd ~/project \\
-  --kind once \\
-  --at 2026-07-22T15:30:00Z \\
+pi-tick add reminder \
+  --prompt "Do the thing" \
+  --cwd ~/project \
+  --kind once \
+  --at 2027-01-22T15:30:00Z \
   --enabled
 ```
 
