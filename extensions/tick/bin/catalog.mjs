@@ -129,6 +129,26 @@ export function findJob(catalog, id) {
   return catalog.jobs.find((j) => j.id === id) || null;
 }
 
+// Claim a one-shot job before spawning Pi. The catalog lock makes this
+// compare-and-set safe when cron/launchd delivers duplicate or concurrent
+// invocations. Returning a copy keeps callers from accidentally mutating the
+// catalog outside the lock.
+export async function claimOnceJob(id) {
+  let claimed = null;
+  await withCatalogLock(async () => {
+    const catalog = loadCatalog();
+    const job = findJob(catalog, id);
+    if (!job || job.schedule?.kind !== "once" || !job.enabled || job.onceConsumedAt) return;
+    const consumedAt = new Date().toISOString();
+    job.enabled = false;
+    job.onceConsumedAt = consumedAt;
+    job.updatedAt = consumedAt;
+    saveCatalog(catalog);
+    claimed = JSON.parse(JSON.stringify(job));
+  });
+  return claimed;
+}
+
 export function catalogLockPath() {
   return jobsFile() + ".lock";
 }

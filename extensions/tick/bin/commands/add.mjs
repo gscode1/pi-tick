@@ -13,7 +13,7 @@ import { ensureDataDirs, loadCatalog, saveCatalog, findJob, withCatalogLock } fr
 import { parseFlags, flagString, flagOptionalU32 } from "../argv.mjs";
 import { fail } from "../errors.mjs";
 import { validateId, validatePrompt, validateCwd } from "../validate.mjs";
-import { buildSchedule, KIND_INTERVAL, KIND_DAILY, KIND_WEEKLY } from "../schedule.mjs";
+import { buildSchedule, KIND_INTERVAL, KIND_DAILY, KIND_WEEKLY, KIND_ONCE } from "../schedule.mjs";
 import { cmdEnableInternal } from "./enable.mjs";
 
 // `scheduleOpts` is in the shape `buildSchedule` already consumes (the same
@@ -35,6 +35,8 @@ export function scheduleOptsFromScheduleValue(kind, scheduleValue) {
   } else if (kind === KIND_WEEKLY) {
     if (sv.time) opts.time = sv.time;
     if (Array.isArray(sv.days) && sv.days.length > 0) opts.days = sv.days.join(",");
+  } else if (kind === KIND_ONCE) {
+    if (sv.at != null) opts.at = sv.at;
   }
   return opts;
 }
@@ -84,6 +86,7 @@ export async function createTick(params, { stdout = process.stdout, stderr = pro
     cwd,
     schedule,
     enabled: false,
+    ...(kind === KIND_ONCE ? { onceConsumedAt: null } : {}),
     model,
     piPath: null,
     nodePath: null,

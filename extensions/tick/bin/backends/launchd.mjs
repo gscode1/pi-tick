@@ -99,6 +99,8 @@ export function renderPlist(job, opts) {
       .map((wd) => `  <dict>\n    <key>Weekday</key>\n    <integer>${wd}</integer>\n    <key>Hour</key>\n    <integer>${fields.hour}</integer>\n    <key>Minute</key>\n    <integer>${fields.minute}</integer>\n  </dict>`)
       .join("\n");
     scheduleKeys = `  <key>StartCalendarInterval</key>\n  <array>\n${entries}\n  </array>\n`;
+  } else if (job.schedule.kind === "once") {
+    scheduleKeys = `  <key>StartCalendarInterval</key>\n  <dict>\n    <key>Month</key>\n    <integer>${fields.month}</integer>\n    <key>Day</key>\n    <integer>${fields.day}</integer>\n    <key>Hour</key>\n    <integer>${fields.hour}</integer>\n    <key>Minute</key>\n    <integer>${fields.minute}</integer>\n  </dict>\n`;
   }
 
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -143,7 +145,7 @@ function launchctlErrorMessage(res) {
 function bootout(jobId) {
   // Ignore errors (might not be loaded) — but if launchctl itself failed to
   // spawn, that's worth knowing about even though the caller doesn't check.
-  const res = runLaunchctl(["bootout", `gui/${userUid()}/${LABEL_PREFIX}${jobId}`, plistPath(jobId)]);
+  const res = runLaunchctl(["bootout", `gui/${userUid()}/${LABEL_PREFIX}${jobId}`]);
   if (res.error) {
     return { ok: false, error: launchctlErrorMessage(res) };
   }
@@ -202,13 +204,15 @@ export const launchdBackend = {
     return { ok: true, referencePath: plistPath(job.id) };
   },
   unregister: async (jobId) => {
-    bootout(jobId);
-    // Rename to .disabled for inspection.
+    // Rename to .disabled for inspection. Do this before bootout: when a
+    // one-shot job unregisters itself from inside its own launchd-spawned
+    // process, bootout terminates that process, so nothing after it runs.
     const pp = plistPath(jobId);
     const dpp = disabledPlistPath(jobId);
     if (existsSync(pp)) {
       try { renameSync(pp, dpp); } catch { /* already gone */ }
     }
+    bootout(jobId);
     return { ok: true, referencePath: dpp };
   },
   unregisterAndDelete: async (jobId) => {

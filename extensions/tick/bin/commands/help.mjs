@@ -10,8 +10,8 @@ Minimum interval: ${getMinIntervalSeconds()}s (cron cannot express sub-minute)
 
 
 Usage:
-  pi-tick add <id> --prompt "..." --cwd <path> --kind <interval|daily|weekly> \\
-                   [--minutes N] [--seconds N] \\
+  pi-tick add <id> --prompt "..." --cwd <path> --kind <interval|daily|weekly|once> \\
+                   [--minutes N] [--seconds N] [--at ISO-8601] \\
                    [--offset-minutes N] [--offset-seconds N] \\
                    [--time HH:MM] [--days mon,wed,fri] \\
                    [--model <id>] [--enabled] \\

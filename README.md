@@ -90,8 +90,9 @@ pi-tick delete nightly-recap
 Flags for `add`:
 - `--prompt "..."` — required (≤ 16 KB)
 - `--cwd <abs path>` — required, must exist
-- `--kind interval|daily|weekly` — required
+- `--kind interval|daily|weekly|once` — required
 - `--minutes N --seconds N` — for `interval` (min total 5s)
+- `--at ISO-8601` — for `once`; absolute future timestamp with `:00` seconds and no fractional milliseconds
 - `--time HH:MM` — for `daily` and `weekly` (24h)
 - `--days mon,wed,fri` — for `weekly` (comma-separated, case-insensitive)
 - `--model <id>` — optional, passed to `pi` as `--model`
@@ -134,7 +135,7 @@ Argument completion works for all of these.
 
 | Tool | Args | Returns |
 |---|---|---|
-| `tick_create` | `jobId, prompt, cwd, scheduleKind, scheduleValue, days?, enabled?, model?` | The new job (JSON). |
+| `tick_create` | `jobId, prompt, cwd, scheduleKind, scheduleValue, enabled?, model?` | The new job (JSON). `scheduleKind=once` uses `scheduleValue.at`; interval/daily/weekly remain recurring. |
 | `tick_list` | — | The catalog as a JSON array. |
 | `tick_delete` | `jobId` | Confirmation. |
 
@@ -214,6 +215,25 @@ automatically.
 - **Output goes to log files.** Each pi-tick crontab line appends to
   `~/.pi/agent/tick/logs/<id>.out.log` and `.err.log`, mirroring the
   macOS launchd behavior.
+
+## One-shot schedules
+
+A one-shot job uses an absolute ISO-8601 timestamp and minute precision:
+
+```sh
+pi-tick add reminder \
+  --prompt "Do the thing" \
+  --cwd ~/project \
+  --kind once \
+  --at 2027-01-22T15:30:00Z \
+  --enabled
+```
+
+The scheduler backend uses calendar fields and may technically match the same
+month/day/time in a later year. The first external invocation atomically marks
+the job consumed and disables it before starting Pi, so duplicate or stale
+invocations cannot run the prompt again. Manual runs do not consume the
+schedule. Failed external runs remain consumed by design.
 
 ## Backends
 

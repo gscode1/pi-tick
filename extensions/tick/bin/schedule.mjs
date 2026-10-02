@@ -15,7 +15,39 @@ export const WEEKDAY_TO_INT = {
 export const KIND_INTERVAL = "interval";
 export const KIND_DAILY = "daily";
 export const KIND_WEEKLY = "weekly";
-export const VALID_KINDS = [KIND_INTERVAL, KIND_DAILY, KIND_WEEKLY];
+export const KIND_ONCE = "once";
+export const VALID_KINDS = [KIND_INTERVAL, KIND_DAILY, KIND_WEEKLY, KIND_ONCE];
+
+// One-shot timestamps intentionally use minute precision. Both supported
+// backends render calendar fields and cannot provide portable sub-minute
+// scheduling semantics.
+export const ONCE_ISO_REGEX = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:00(?:\.000)?(?:Z|[+-]\d{2}:\d{2})$/;
+
+export function validateOnceAt(at, { now = new Date() } = {}) {
+  const match = typeof at === "string" && at.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):00(?:\.000)?(Z|([+-])(\d{2}):(\d{2}))$/);
+  if (!match) {
+    fail(`invalid --at '${String(at)}': must be an absolute ISO-8601 timestamp with minute precision (seconds must be 00)`, 2);
+  }
+  const [, ys, mos, ds, hs, mis, zone, sign, ohs, oms] = match;
+  const year = Number(ys);
+  const month = Number(mos);
+  const day = Number(ds);
+  const hour = Number(hs);
+  const minute = Number(mis);
+  const offsetMinutes = zone === "Z" ? 0 : Number(ohs) * 60 + Number(oms);
+  if (month < 1 || month > 12 || day < 1 || day > new Date(Date.UTC(year, month, 0)).getUTCDate()
+      || hour > 23 || minute > 59 || (zone !== "Z" && (Number(ohs) > 23 || Number(oms) > 59))) {
+    fail(`invalid --at '${at}': must be a valid ISO-8601 timestamp`, 2);
+  }
+  const parsed = new Date(Date.UTC(year, month - 1, day, hour, minute) - (sign === "-" ? -offsetMinutes : offsetMinutes) * 60_000);
+  if (!Number.isFinite(parsed.getTime())) {
+    fail(`invalid --at '${at}': must be a valid ISO-8601 timestamp`, 2);
+  }
+  if (parsed.getTime() <= now.getTime()) {
+    fail(`invalid --at '${at}': timestamp must be in the future`, 2);
+  }
+  return parsed.toISOString();
+}
 
 export function validateKind(kind) {
   if (!VALID_KINDS.includes(kind)) {
@@ -105,6 +137,9 @@ export function buildSchedule(kind, opts) {
     validateTime(opts.time);
     return { kind, value: { days, time: opts.time } };
   }
+  if (kind === KIND_ONCE) {
+    return { kind, value: { at: validateOnceAt(opts.at) } };
+  }
   fail(`unreachable: kind '${kind}'`, 2);
 }
 
@@ -130,6 +165,20 @@ export function resolveScheduleFields(schedule) {
     const [hour, minute] = String(s.value.time).split(":").map(Number);
     const weekdays = s.value.days.map((d) => WEEKDAY_TO_INT[d]).sort((a, b) => a - b);
     return { kind: s.kind, hour, minute, totalSeconds: null, offsetSeconds: 0, weekdays };
+  }
+  if (s.kind === KIND_ONCE) {
+    const at = new Date(s.value.at);
+    return {
+      kind: s.kind,
+      year: at.getFullYear(),
+      month: at.getMonth() + 1,
+      day: at.getDate(),
+      hour: at.getHours(),
+      minute: at.getMinutes(),
+      totalSeconds: null,
+      offsetSeconds: 0,
+      weekdays: null,
+    };
   }
   return { kind: s.kind, hour: null, minute: null, totalSeconds: null, offsetSeconds: 0, weekdays: null };
 }
@@ -177,6 +226,9 @@ export function nextFireAt(schedule, now = new Date()) {
   }
   if (s.kind === KIND_WEEKLY) {
     return nextWeeklyAt(now, s.value.days, s.value.time);
+  }
+  if (s.kind === KIND_ONCE) {
+    return new Date(s.value.at).toISOString();
   }
   return "--";
 }
