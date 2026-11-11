@@ -4,8 +4,7 @@ import { runJob, pruneTranscripts } from "../extensions/tick/bin/runner.mjs";
 import { loadCatalog, saveCatalog } from "../extensions/tick/bin/catalog.mjs";
 import { EventEmitter } from "node:events";
 import { mkdtempSync, rmSync, writeFileSync, readdirSync, statSync, readFileSync, mkdirSync, utimesSync, chmodSync, symlinkSync, existsSync } from "node:fs";
-import { join } from "node:path";
-import { dirname } from "node:path";
+import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 
 let tempDir;

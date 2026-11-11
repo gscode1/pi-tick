@@ -445,10 +445,6 @@ export async function runJob(job, trigger, options) {
     stderr.write(`pi-tick: cannot open transcript ${transcriptPath || "(unknown)"}: ${err.message}\n`);
   }
 
-  // Pi is an executable entry point: npm installs use a Node shebang,
-  // Homebrew/version managers may use a shell wrapper, and standalone builds
-  // may be native binaries. Let the OS honor that entry point rather than
-  // assuming its contents are JavaScript. Keep argv separate (no shell).
   const triggerKind = trigger || "external";
 
   const env = { ...process.env, CONTEXT_MODE_BRIDGE_DEPTH: process.env.CONTEXT_MODE_BRIDGE_DEPTH || "1" };
@@ -456,6 +452,7 @@ export async function runJob(job, trigger, options) {
 
   let child;
   try {
+    // Execute Pi directly so the OS handles shell wrappers, shebangs, and binaries.
     child = spawnFn(piPath, args, {
       cwd: job.cwd,
       stdio: [isSlashCommand ? "pipe" : "ignore", "pipe", "pipe"],
