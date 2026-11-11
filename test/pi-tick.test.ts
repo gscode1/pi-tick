@@ -705,7 +705,7 @@ test("cmdAdd --enabled succeeds end-to-end with stubbed node/pi/launchctl", asyn
       const j = cat.jobs.find((j: { id: string }) => j.id === "happy-job");
       assert.equal(j.enabled, true);
       // Both piPath and nodePath are resolved and stored at enable time
-      // (nodePath is what the runner uses to bypass the shebang in launchd context).
+      // (nodePath runs the stable scheduler CLI; piPath is executed directly).
       assert.ok(j.piPath && j.piPath.length > 0, "piPath is set");
       assert.ok(j.nodePath && j.nodePath.length > 0, "nodePath is set");
       const pp = join(plistDir, "dev.pi.tick.happy-job.plist");
@@ -1842,7 +1842,8 @@ test("killActiveRun escalates to SIGKILL when the child ignores SIGTERM", async 
       // the point of the test. A Node child sidesteps that shell-specific
       // signal-inheritance ambiguity entirely.
       const stubScript = join(env.__stubDir, "pi-stubborn.mjs");
-      writeFileSync(stubScript, `process.on("SIGTERM", () => {});\nsetInterval(() => {}, 1000);\n`, "utf8");
+      const readyFile = join(dir, "stubborn-ready");
+      writeFileSync(stubScript, `#!${process.execPath}\nimport { writeFileSync } from "node:fs";\nprocess.on("SIGTERM", () => {});\nwriteFileSync(${JSON.stringify(readyFile)}, "ready");\nsetInterval(() => {}, 1000);\n`, { mode: 0o755 });
       const catalogMod = await import(new URL("../extensions/tick/bin/catalog.mjs", import.meta.url).pathname);
       const registryMod = await import(new URL("../extensions/tick/bin/run-registry.mjs", import.meta.url).pathname);
       await withEnv(env, () => {
@@ -1863,9 +1864,12 @@ test("killActiveRun escalates to SIGKILL when the child ignores SIGTERM", async 
         if (!active?.childPid) await new Promise((r) => setTimeout(r, 20));
       }
       assert.ok(active?.childPid);
-      // Give the process a moment to reach process.on("SIGTERM", ...)
-      // before we signal it.
-      await new Promise((r) => setTimeout(r, 150));
+      // Wait for the actual handler, not a fixed delay: Node startup under
+      // the parallel suite can take longer than 150ms on a busy machine.
+      for (let i = 0; i < 250 && !existsSync(readyFile); i++) {
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      assert.ok(existsSync(readyFile), "SIGTERM handler is ready");
 
       const result = await withEnv(env, () => killActiveRun("stubborn", { graceMs: 300, pollMs: 20 }));
       assert.equal(result.ok, true);

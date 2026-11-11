@@ -420,7 +420,7 @@ async function updateLastRunAndPrune(jobId, record, { transcriptPath, finishedAt
 }
 
 export async function runJob(job, trigger, options) {
-  const { nodePath, piPath, transcriptsDir, logsDir, spawnFn = spawn, stderr = process.stderr, envPath, defaultModel } = options;
+  const { piPath, transcriptsDir, logsDir, spawnFn = spawn, stderr = process.stderr, envPath, defaultModel } = options;
 
   const { isSlashCommand, args, effectiveModel } = buildRunArgs(job, { defaultModel });
 
@@ -444,8 +444,10 @@ export async function runJob(job, trigger, options) {
     stderr.write(`pi-tick: cannot open transcript ${transcriptPath || "(unknown)"}: ${err.message}\n`);
   }
 
-  const childProgram = nodePath && existsSync(nodePath) ? nodePath : piPath;
-  const childArgs = nodePath && existsSync(nodePath) ? [piPath, ...args] : args;
+  // Pi is an executable entry point: npm installs use a Node shebang,
+  // Homebrew/version managers may use a shell wrapper, and standalone builds
+  // may be native binaries. Let the OS honor that entry point rather than
+  // assuming its contents are JavaScript. Keep argv separate (no shell).
   const triggerKind = trigger || "external";
 
   const env = { ...process.env, CONTEXT_MODE_BRIDGE_DEPTH: process.env.CONTEXT_MODE_BRIDGE_DEPTH || "1" };
@@ -453,7 +455,7 @@ export async function runJob(job, trigger, options) {
 
   let child;
   try {
-    child = spawnFn(childProgram, childArgs, {
+    child = spawnFn(piPath, args, {
       cwd: job.cwd,
       stdio: [isSlashCommand ? "pipe" : "ignore", "pipe", "pipe"],
       env,
