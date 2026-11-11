@@ -3,8 +3,9 @@ import assert from "node:assert/strict";
 import { runJob, pruneTranscripts } from "../extensions/tick/bin/runner.mjs";
 import { loadCatalog, saveCatalog } from "../extensions/tick/bin/catalog.mjs";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, rmSync, writeFileSync, readdirSync, statSync, readFileSync, mkdirSync, utimesSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, readdirSync, statSync, readFileSync, mkdirSync, utimesSync, chmodSync, symlinkSync, existsSync } from "node:fs";
 import { join } from "node:path";
+import { dirname } from "node:path";
 import { tmpdir } from "node:os";
 
 let tempDir;
@@ -318,3 +319,56 @@ test("pruneTranscripts - eviction logic", () => {
   assert.ok(!files.includes("new1.jsonl"), "new1 should be pruned by size");
   assert.ok(files.includes("new2.jsonl"), "new2 should be kept");
   });
+
+// Exercise real OS process launching: the old node <pi> path failed on the
+// Homebrew shell wrapper, even though the mocked spawn tests passed.
+for (const kind of ["homebrew-wrapper", "npm-shebang", "npm-symlink", "native"]) {
+  test(`runJob launches an executable ${kind} with literal argv`, async () => {
+    const dir = join(tempDir, kind + " space;literal");
+    mkdirSync(dir);
+    const argvFile = join(dir, "argv.json");
+    const js = join(dir, "cli.mjs");
+    writeFileSync(js, `#!/usr/bin/env node
+import { writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(argvFile)}, JSON.stringify(process.argv.slice(2)));
+console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "LAUNCH_OK" }] } }));
+`, { mode: 0o755 });
+    const piPath = kind === "native" ? "/bin/echo" : join(dir, "pi");
+    if (kind === "homebrew-wrapper") {
+      // Match Homebrew's environment assignment + exec wrapper.
+      writeFileSync(piPath, `#!/bin/bash\nPI_SKIP_VERSION_CHECK="1" exec '${process.execPath}' '${js}' "$@"\n`, { mode: 0o755 });
+    } else if (kind === "npm-symlink") {
+      symlinkSync(js, piPath);
+    } else if (kind === "npm-shebang") {
+      writeFileSync(piPath, readFileSync(js), { mode: 0o755 });
+    }
+    const sentinel = join(dir, "INJECTED");
+    const prompt = `literal spaces ' " ; touch ${sentinel}; $(touch ${sentinel}) \`touch ${sentinel}\`\nnext line`;
+    const result = await runJob({ ...defaultJob, id: kind, prompt, cwd: dir }, "manual", {
+      ...getDefaultOptions(),
+      nodePath: process.execPath, // A real Node must not parse a shell/native launcher.
+      piPath,
+      envPath: `${dirname(process.execPath)}:/usr/bin:/bin`,
+    });
+    assert.equal(result.exitCode, 0, result.error ?? "launcher failed");
+    assert.equal(existsSync(sentinel), false, "prompt must never be interpreted by a shell");
+    const expected = ["--mode", "json", "-p", "--no-session", prompt];
+    if (kind === "native") {
+      assert.equal(readFileSync(result.transcriptPath, "utf8"), expected.join(" ") + "\n");
+    } else {
+      assert.deepEqual(JSON.parse(readFileSync(argvFile, "utf8")), expected);
+      assert.match(readFileSync(result.transcriptPath, "utf8"), /LAUNCH_OK/);
+    }
+  });
+}
+
+test("runJob records permission failure without interpreting a nonexecutable launcher", async () => {
+  const piPath = join(tempDir, "nonexecutable-pi");
+  writeFileSync(piPath, "#!/bin/sh\nexit 0\n", { mode: 0o644 });
+  chmodSync(piPath, 0o644);
+  const result = await runJob({ ...defaultJob, id: "nonexecutable" }, "manual", {
+    ...getDefaultOptions(), nodePath: process.execPath, piPath,
+  });
+  assert.equal(result.reason, "spawn_error");
+  assert.match(result.error, /EACCES/);
+});
