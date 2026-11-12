@@ -4,7 +4,9 @@ import { ensureDataDirs, loadCatalog, findJob, withCatalogLock, saveCatalog, cle
 import { parseFlags } from "../argv.mjs";
 import { fail } from "../errors.mjs";
 import { validateId } from "../validate.mjs";
+import { existsSync } from "node:fs";
 import { activeBackend } from "../backend-info.mjs";
+import { plistPath, disabledPlistPath } from "../backends/launchd.mjs";
 
 export async function cmdDelete(argv, { stdout = process.stdout, stderr = process.stderr } = {}) {
   const flags = parseFlags(argv);
@@ -22,12 +24,24 @@ export async function cmdDelete(argv, { stdout = process.stdout, stderr = proces
   }
   const preJob = findJob(pre, id);
   if (!preJob) {
+    // Orphan cleanup (launchd): no catalog entry, but plist files for exactly
+    // this id remain (e.g. from an older delete). Remove only those.
+    const backend = activeBackend();
+    if (backend.name === "launchd" && (existsSync(plistPath(id)) || existsSync(disabledPlistPath(id)))) {
+      const r = await backend.unregisterAndDelete(id);
+      if (!r.ok) fail(r.error, 1);
+      stdout.write(`no such job '${id}' in catalog; removed orphan launchd plist file(s)\n`);
+      return 0;
+    }
     stderr.write(`pi-tick: no such job: ${id}\n`);
     return 0;
   }
 
   // Slow backend call: OUTSIDE the lock (see commands/enable.mjs for why).
-  if (preJob.enabled) {
+  // launchd: always run, since a disabled job leaves a .plist.disabled that
+  // unregisterAndDelete also removes. cron has no leftover for disabled jobs
+  // (disable already removed the crontab entry), so skip it there.
+  if (preJob.enabled || activeBackend().name === "launchd") {
     const r = await activeBackend().unregisterAndDelete(id);
     if (!r.ok) fail(r.error, 1);
   }
