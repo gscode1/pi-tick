@@ -2303,3 +2303,48 @@ test("scripts/sync-cli.mjs installs every bundle file into PI_TICK_DATA_DIR", as
     }
   });
 });
+
+// Issue #20 — runtime limits must be plain digit strings <= 2^31-1.
+for (const [flag, val] of [
+  ["--timeout-ms", "4294967295"],
+  ["--timeout-ms", "2147483648"],
+  ["--idle-timeout-ms", "2147483648"],
+  ["--kill-grace-ms", "2147483648"],
+  ["--max-output-bytes", "2147483648"],
+  ["--timeout-ms", ""],
+  ["--idle-timeout-ms", "   "],
+  ["--max-output-bytes", ""],
+  ["--timeout-ms", "1e3"],
+  ["--timeout-ms", "1.5"],
+  ["--timeout-ms", "-1"],
+] as const) {
+  test(`cmdAdd rejects ${flag}=${JSON.stringify(val)}`, async () => {
+    await withTempDir(async (dir) => {
+      const env = setupEnv({ dataDir: dir, plistDir: join(dir, "agents") });
+      try {
+        await assert.rejects(
+          () => withEnv(env, () => cmdAdd([
+            "bad", "--prompt", "p", "--cwd", "/tmp", "--kind", "daily", "--time", "09:00", `${flag}=${val}`,
+          ], { stdout: process.stdout as any, stderr: process.stderr as any })),
+          /non-negative integer|at most/,
+        );
+      } finally {
+        teardownEnv(env);
+      }
+    });
+  });
+}
+
+test("cmdAdd accepts the 2^31-1 boundary", async () => {
+  await withTempDir(async (dir) => {
+    const env = setupEnv({ dataDir: dir, plistDir: join(dir, "agents") });
+    try {
+      const code = await withEnv(env, () => cmdAdd([
+        "edge", "--prompt", "p", "--cwd", "/tmp", "--kind", "daily", "--time", "09:00", "--timeout-ms", "2147483647",
+      ], { stdout: process.stdout as any, stderr: process.stderr as any }));
+      assert.equal(code, 0);
+    } finally {
+      teardownEnv(env);
+    }
+  });
+});

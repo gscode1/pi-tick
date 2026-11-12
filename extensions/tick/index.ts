@@ -382,10 +382,10 @@ export default function (pi: ExtensionAPI): void {
       }),
       enabled: Type.Optional(Type.Boolean({ description: "If true, register the schedule with the active backend in the same call" })),
       model: Type.Optional(Type.String({ description: "Optional model id (passed to pi as --model)" })),
-      timeoutMs: Type.Optional(Type.Number({ description: "Wall-clock timeout in ms; SIGTERM then SIGKILL after killGraceMs. 0 = disabled. Default 30m." })),
-      idleTimeoutMs: Type.Optional(Type.Number({ description: "No-stdout/no-stderr cap in ms; SIGTERM when reached. 0 = disabled. Default 0." })),
-      maxOutputBytes: Type.Optional(Type.Number({ description: "Transcript cap in bytes; child is killed when exceeded. 0 = disabled. Default 0." })),
-      killGraceMs: Type.Optional(Type.Number({ description: "Delay between SIGTERM and SIGKILL in ms. Default 5_000." })),
+      timeoutMs: Type.Optional(Type.Integer({ minimum: 0, maximum: 2147483647, description: "Wall-clock timeout in ms; SIGTERM then SIGKILL after killGraceMs. 0 = disabled. Default 30m." })),
+      idleTimeoutMs: Type.Optional(Type.Integer({ minimum: 0, maximum: 2147483647, description: "No-stdout/no-stderr cap in ms; SIGTERM when reached. 0 = disabled. Default 0." })),
+      maxOutputBytes: Type.Optional(Type.Integer({ minimum: 0, maximum: 2147483647, description: "Transcript cap in bytes; child is killed when exceeded. 0 = disabled. Default 0." })),
+      killGraceMs: Type.Optional(Type.Integer({ minimum: 1, maximum: 2147483647, description: "Delay between SIGTERM and SIGKILL in ms. Default 5_000." })),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
       // Calls createTick() directly with typed params — no argv strings, no
