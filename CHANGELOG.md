@@ -7,11 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Interval offsets are rendered as calendar entries on launchd and cron (no more extra hourly runs on launchd; cron now supports offsets); intervals a backend can't express are rejected at add time. `next-fire` accounts for offsets (#24, #27).
+- A second run of a job that is already running is refused (manual: exit 5; scheduler: exit 0 with a note). `pi-tick run` stopped by SIGTERM/SIGINT records `terminated` (#26).
+- `runs.jsonl` rotates to `runs.jsonl.1` above 10 MB; `show` reads at most the last 32 MB of a transcript (#31).
+
 ### Fixed
 - Runtime limits (`--timeout-ms`, `--idle-timeout-ms`, `--kill-grace-ms`, `--max-output-bytes`) reject empty, non-integer and out-of-range values; timer delays are capped at 2^31-1 ms so huge values no longer fire after ~1 ms (#20).
 - The runner no longer crashes with EPIPE when pi closes stdin early on slash-command jobs, parses a final stdout line without a trailing newline, and records `spawn_error` only when the child never started (#21).
 - Catalog lock: stale-lock reaping is serialized and identity-checked, and a holder only releases its own lock, so concurrent runs no longer lose catalog updates (#22).
 - The test suite no longer writes run records into the real `~/.pi/agent/tick/runs.jsonl`; tests refuse to use a data directory under the real `~/.pi` (#23).
+- One-shot jobs only run within 1 minute before to 24 hours after their time; missed slots are recorded as `once_missed` and their scheduler entry removed, so they no longer fire a year later (#25).
+- A corrupt `config.json` no longer breaks runs or consumes one-shot jobs (#29).
+- `kill` stops the whole process group; the runner no longer hangs on descendants holding stdout; run detection no longer matches prefixed ids or reused PIDs (#26).
+- CLI: bare `--model` and bare schedule flags are rejected, boolean flags no longer swallow the job id, `--` ends options, a failed `add --enabled` is rolled back, and `/tick` commands show CLI errors instead of false success; `--cwd` must be a directory (#28).
+- Size-based transcript pruning keeps the newest transcript; transcripts are ordered by their start time; `LOG_RETENTION_DAYS=0` no longer deletes the current log (#31).
+- `log` no longer warns about a malformed first line, and multi-byte characters at read boundaries are preserved (#30).
 
 ## [0.1.5] - 2026-11-12
 
