@@ -21,7 +21,7 @@ Usage:
   pi-tick delete <id>
   pi-tick enable <id>
   pi-tick disable <id>
-  pi-tick run <id> [--manual]
+  pi-tick run <id> [--manual]   (--manual runs even if disabled)
   pi-tick kill <id> [--grace-ms N]
   pi-tick log [id] [--limit N] [--failed] [--since <dur>]
   pi-tick transcripts <id> [--limit N]

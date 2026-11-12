@@ -28,7 +28,11 @@ export async function cmdRun(argv, { stdout = process.stdout, stderr = process.s
   // (issue #48). Manual runs never consume a one-shot schedule.
   const trigger = (flags.manual === true || flags.manual === "true") ? "manual" : "external";
 
-  if (!job.enabled) {
+  // Explicit manual runs ignore `enabled` so a job can be tested without
+  // registering it with the scheduler. Scheduler-triggered runs skip disabled
+  // jobs (including consumed one-shots) and exit 0: a stale scheduler entry is
+  // expected, and non-zero would only add launchd/cron failure noise.
+  if (trigger === "external" && !job.enabled) {
     stderr.write(`pi-tick: job '${id}' is disabled; not running\n`);
     return 0;
   }
