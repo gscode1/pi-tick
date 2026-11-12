@@ -10,7 +10,7 @@ import {
   TRANSCRIPT_FINAL_TEXT_PREVIEW, TRANSCRIPT_PRUNE_THROTTLE_MS,
   RUNTIME_DEFAULTS,
 } from "./catalog.mjs";
-import { writeActiveRun, clearActiveRun } from "./run-registry.mjs";
+import { writeActiveRun, clearActiveRun, killRequested } from "./run-registry.mjs";
 import { runsFile } from "./paths.mjs";
 
 export const TRANSCRIPT_RETENTION_DAYS = 7;
@@ -257,6 +257,7 @@ function createRpcLifecycle({ isSlashCommand, child }) {
   let closeTimer = null;
   let lastUsage = null;
   let finalText = null;
+  let finalError = null;
 
   const closeStdin = () => {
     if (isSlashCommand && child.stdin && !child.stdin.destroyed) child.stdin.end();
@@ -276,6 +277,13 @@ function createRpcLifecycle({ isSlashCommand, child }) {
     }
     if (evt.type === "message_end" && evt.message) {
       if (evt.message.usage) lastUsage = evt.message.usage;
+      if (evt.message.role === "assistant") {
+        // The LAST assistant message decides: an earlier error that a retry
+        // recovered from must not fail the run (issue #13).
+        finalError = evt.message.stopReason === "error"
+          ? String(evt.message.errorMessage || "model error")
+          : null;
+      }
       if (evt.message.role === "assistant" && Array.isArray(evt.message.content)) {
         const texts = evt.message.content
           .filter((p) => p && p.type === "text" && typeof p.text === "string")
@@ -302,6 +310,7 @@ function createRpcLifecycle({ isSlashCommand, child }) {
     },
     getLastUsage: () => lastUsage,
     getFinalText: () => finalText,
+    getFinalError: () => finalError,
   };
 }
 
@@ -312,7 +321,7 @@ function createRpcLifecycle({ isSlashCommand, child }) {
 function buildRunRecord({
   runId, jobId, triggerKind, startedAt, finishedAt,
   code, signal, spawnErr, killReason, transcriptWriteError,
-  stderrBuf, finalText, effectiveModel, lastUsage,
+  stderrBuf, finalText, finalError, effectiveModel, lastUsage,
   transcriptPath, transcriptBytes,
 }) {
   let exitCode = typeof code === "number" ? code : 1;
@@ -324,7 +333,9 @@ function buildRunRecord({
     reason = "spawn_error";
     error = `spawn failed: ${spawnErr.message}`;
   } else if (killReason) {
-    exitCode = 124;
+    // "killed" = `pi-tick kill` (user-requested); the rest are runner-imposed
+    // limits. Exit code is 124 for limits, 143 (SIGTERM convention) for kills.
+    exitCode = killReason === "killed" ? 143 : 124;
     reason = killReason;
     error = killReason;
   } else if (transcriptWriteError) {
@@ -334,6 +345,11 @@ function buildRunRecord({
   } else if (signal) {
     reason = "signal";
     error = `killed by ${signal}`;
+  } else if (exitCode === 0 && finalError) {
+    // pi exits 0 even when the model call itself failed (issue #13).
+    exitCode = 1;
+    reason = "model_error";
+    error = finalError.slice(0, 200);
   } else if (exitCode === 0) {
     const taskflowFailure = extractTaskflowFailure(finalText);
     if (taskflowFailure) {
@@ -561,10 +577,13 @@ export async function runJob(job, trigger, options) {
         try { transcriptBytes = statSync(transcriptPath).size; } catch { /* best effort */ }
       }
 
+      // Timeout/idle/output-cap reasons win; otherwise a kill marker written
+      // by `pi-tick kill` (run-registry.mjs) means the user stopped the run.
+      const killReason = controls.getKillReason() || (killRequested(job.id, runId) ? "killed" : null);
       const record = buildRunRecord({
         runId, jobId: job.id, triggerKind, startedAt, finishedAt,
-        code, signal, spawnErr, killReason: controls.getKillReason(), transcriptWriteError,
-        stderrBuf, finalText: rpc.getFinalText(), effectiveModel, lastUsage: rpc.getLastUsage(),
+        code, signal, spawnErr, killReason, transcriptWriteError,
+        stderrBuf, finalText: rpc.getFinalText(), finalError: rpc.getFinalError(), effectiveModel, lastUsage: rpc.getLastUsage(),
         transcriptPath, transcriptBytes,
       });
 
