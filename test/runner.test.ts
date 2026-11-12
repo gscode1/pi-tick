@@ -67,6 +67,46 @@ test("runJob - exit_code", async () => {
   assert.equal(res.reason, "exit_code");
 });
 
+function assistantEnd(extra) {
+  return JSON.stringify({ type: "message_end", message: { role: "assistant", content: [], usage: { input: 0, output: 0 }, ...extra } }) + "\n";
+}
+
+test("runJob - model_error when final assistant message errored but pi exits 0", async () => {
+  const res = await runJob(defaultJob, "external", {
+    ...getDefaultOptions(),
+    spawnFn: () => {
+      const child = createMockChild();
+      setTimeout(() => {
+        child.stdout.emit("data", Buffer.from(assistantEnd({ stopReason: "error", errorMessage: "Codex error: model not supported" })));
+        child.emit("close", 0, null);
+      }, 10);
+      return child;
+    }
+  });
+  assert.equal(res.reason, "model_error");
+  assert.equal(res.exitCode, 1);
+  assert.equal(res.error, "Codex error: model not supported");
+});
+
+test("runJob - an errored message followed by a successful one stays a success", async () => {
+  const res = await runJob(defaultJob, "external", {
+    ...getDefaultOptions(),
+    spawnFn: () => {
+      const child = createMockChild();
+      setTimeout(() => {
+        child.stdout.emit("data", Buffer.from(assistantEnd({ stopReason: "error", errorMessage: "transient" })));
+        child.stdout.emit("data", Buffer.from(assistantEnd({ stopReason: "stop", content: [{ type: "text", text: "OK" }] })));
+        child.emit("close", 0, null);
+      }, 10);
+      return child;
+    }
+  });
+  assert.equal(res.reason, "exit_code");
+  assert.equal(res.exitCode, 0);
+  assert.equal(res.error, null);
+  assert.equal(res.finalTextPreview, "OK");
+});
+
 // Issue #55 — cmdAdd now stores `null` (not an evaluated default) for
 // timeoutMs/idleTimeoutMs/maxOutputBytes/killGraceMs when the user omits
 // the flag. runJob must treat a stored null exactly like the field being

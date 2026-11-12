@@ -1822,8 +1822,8 @@ test("cmdKill terminates a running job's process tree (SIGTERM)", async () => {
       assert.ok(!isPidAlive(active.childPid), "the pi child is no longer running after the kill");
 
       const rec = JSON.parse(readFileSync(join(dir, "runs.jsonl"), "utf8").trim());
-      assert.equal(rec.reason, "signal");
-      assert.match(rec.error, /SIGTERM/);
+      assert.equal(rec.reason, "killed");
+      assert.equal(rec.error, "killed");
     } finally {
       teardownEnv(env);
     }
@@ -1878,6 +1878,10 @@ test("killActiveRun escalates to SIGKILL when the child ignores SIGTERM", async 
       assert.ok(!isPidAlive(active.childPid));
 
       await runPromise;
+      // Issue #16: a run ended by `kill` is recorded as such, not exit_code.
+      const rec = JSON.parse(readFileSync(join(dir, "runs.jsonl"), "utf8").trim().split("\n").pop()!);
+      assert.equal(rec.reason, "killed");
+      assert.notEqual(rec.exitCode, 0);
     } finally {
       teardownEnv(env);
     }
