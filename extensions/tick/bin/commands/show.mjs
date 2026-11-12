@@ -1,13 +1,21 @@
 // commands/show.mjs — `pi-tick show <id> [--run N|--run-id <id>] [--tail M] [--raw] [--no-meta]`.
 
-import { readFileSync } from "node:fs";
 import { parseFlags } from "../argv.mjs";
 import { fail } from "../errors.mjs";
 import { validateId } from "../validate.mjs";
+import { readTail, compareNewestFirst } from "../format.mjs";
 import {
   listTranscriptFiles, parseTranscriptFilename, findRunRecord,
   formatRunHeader, prettyPrintTranscript,
 } from "../transcript-view.mjs";
+
+// Upper bound on how much of a transcript `show` loads into memory. Larger
+// transcripts are tailed (the newest SHOW_MAX_BYTES), with a note.
+export const SHOW_MAX_BYTES = 32 * 1024 * 1024;
+function showMaxBytes() {
+  const n = Number(process.env.PI_TICK_SHOW_MAX_BYTES);
+  return Number.isSafeInteger(n) && n > 0 ? n : SHOW_MAX_BYTES;
+}
 
 export function cmdShow(argv, { stdout = process.stdout, stderr = process.stderr } = {}) {
   const flags = parseFlags(argv);
@@ -29,7 +37,7 @@ export function cmdShow(argv, { stdout = process.stdout, stderr = process.stderr
   const rawMode = flags.raw === true || flags.raw === "true";
   const noMeta = flags["no-meta"] === true || flags["no-meta"] === "true";
 
-  const files = listTranscriptFiles(id).sort((a, b) => b.mtime.getTime() - a.mtime.getTime());
+  const files = listTranscriptFiles(id).sort(compareNewestFirst);
   if (files.length === 0) {
     stdout.write(`(no transcripts for job '${id}')\n`);
     return 0;
@@ -44,14 +52,18 @@ export function cmdShow(argv, { stdout = process.stdout, stderr = process.stderr
   } else if (runIdx >= files.length) {
     fail(`--run ${runIdx} is out of range; only ${files.length} transcript(s) available for '${id}'`, 2);
   }
-  const content = readFileSync(file.path, "utf8");
+  const tail = readTail(file.path, { maxBytes: showMaxBytes() });
+  const lineSource = tail.lines;
+  const truncNote = tail.truncated
+    ? `(transcript truncated: showing only the last ${lineSource.length} complete line(s) within ${showMaxBytes()} of ${file.size} bytes; open ${file.path} for the full file)`
+    : null;
 
   if (rawMode) {
     // Emit one event per line for easy piping to `jq`. We tag with `event:`
     // so the user can grep on the prefix. Malformed lines are passed through
     // verbatim with a `raw:` tag so they aren't silently lost.
-    for (const line of content.split("\n")) {
-      if (!line) continue;
+    if (truncNote) stderr.write(truncNote + "\n");
+    for (const line of lineSource) {
       try {
         const evt = JSON.parse(line);
         stdout.write(`event: ${JSON.stringify(evt)}\n`);
@@ -63,7 +75,7 @@ export function cmdShow(argv, { stdout = process.stdout, stderr = process.stderr
   }
 
   const events = [];
-  for (const line of content.split("\n")) {
+  for (const line of lineSource) {
     if (!line.trim()) continue;
     try { events.push(JSON.parse(line)); } catch { /* skip non-JSON */ }
   }
@@ -73,6 +85,7 @@ export function cmdShow(argv, { stdout = process.stdout, stderr = process.stderr
     const rec = parsed ? findRunRecord(parsed.runId) : null;
     stdout.write(formatRunHeader(file, rec, id) + "\n");
   }
+  if (truncNote) stdout.write(truncNote + "\n");
 
   // Optionally trim to the last N assistant turns. A "turn" is one
   // assistant `message_end`. We keep everything from the Nth-to-last turn

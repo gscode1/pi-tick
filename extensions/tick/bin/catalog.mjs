@@ -97,9 +97,60 @@ export function writeAtomic(path, obj) {
   renameSync(tmp, path);
 }
 
+// runs.jsonl rotation (issue #31): once the file exceeds this size it is
+// renamed to `<path>.1` (a single generation; an older .1 is overwritten).
+// Readers (tailRunLines in format.mjs) consult both files.
+export const RUNS_MAX_BYTES = 10 * 1024 * 1024;
+const ROTATE_LOCK_STALE_MS = 30_000;
+
+function runsMaxBytes() {
+  const n = Number(process.env.PI_TICK_RUNS_MAX_BYTES);
+  return Number.isSafeInteger(n) && n > 0 ? n : RUNS_MAX_BYTES;
+}
+
+// Rotate under a tiny exclusive lock file so two appenders that both saw an
+// oversized file cannot rename twice (the second rename would clobber .1 with
+// the fresh, nearly empty file). The size is re-checked inside the lock. An
+// appender that already has the old file open just appends to the rotated
+// copy, so no line is lost. If the lock is held, skip: the other process is
+// rotating.
+function rotateIfLarge(path, maxBytes) {
+  let size;
+  try { size = statSync(path).size; } catch { return; }
+  if (size <= maxBytes) return;
+  const lock = `${path}.rotate.lock`;
+  let fd;
+  try {
+    fd = openSync(lock, "wx", 0o600);
+  } catch (err) {
+    if (err && err.code === "EEXIST") {
+      try {
+        if (Date.now() - statSync(lock).mtimeMs > ROTATE_LOCK_STALE_MS) unlinkSync(lock);
+      } catch { /* */ }
+    }
+    return;
+  }
+  try {
+    closeSync(fd);
+    try {
+      if (statSync(path).size > maxBytes) renameSync(path, `${path}.1`);
+    } catch { /* best effort */ }
+  } finally {
+    try { unlinkSync(lock); } catch { /* */ }
+  }
+}
+
 export function appendJsonl(path, obj) {
   const data = JSON.stringify(obj);
-  appendFileSync(path, data + "\n", { encoding: "utf8" });
+  rotateIfLarge(path, runsMaxBytes());
+  // Open with mode 0600 so a newly created file is never briefly
+  // world-readable (previously created with the umask default, then chmodded).
+  const fd = openSync(path, "a", 0o600);
+  try {
+    writeSync(fd, data + "\n");
+  } finally {
+    closeSync(fd);
+  }
 }
 
 export function ensureFileMode(path, mode) {

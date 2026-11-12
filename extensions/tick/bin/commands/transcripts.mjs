@@ -4,7 +4,7 @@ import { parseFlags } from "../argv.mjs";
 import { fail } from "../errors.mjs";
 import { validateId } from "../validate.mjs";
 import { listTranscriptFiles } from "../transcript-view.mjs";
-import { formatLocal } from "../format.mjs";
+import { formatLocal, compareNewestFirst } from "../format.mjs";
 import { printTable } from "../display.mjs";
 
 export function cmdTranscripts(argv, { stdout = process.stdout, stderr = process.stderr } = {}) {
@@ -17,7 +17,7 @@ export function cmdTranscripts(argv, { stdout = process.stdout, stderr = process
   if (!Number.isFinite(limit) || limit < 0) fail(`--limit must be a non-negative number (got '${flags.limit}')`, 2);
 
   const files = listTranscriptFiles(id)
-    .sort((a, b) => b.mtime.getTime() - a.mtime.getTime())
+    .sort(compareNewestFirst)
     .slice(0, limit);
 
   if (files.length === 0) {
@@ -27,7 +27,7 @@ export function cmdTranscripts(argv, { stdout = process.stdout, stderr = process
 
   const headers = ["startedAt", "bytes", "transcript"];
   const rows = files.map((f) => [
-    formatLocal(new Date(f.mtime).toISOString()),
+    formatLocal(f.startedAt.toISOString()),
     String(f.size),
     f.path,
   ]);
