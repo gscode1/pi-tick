@@ -192,8 +192,11 @@ function createRunControls(child, { timeoutMs, idleTimeoutMs, killGraceMs }) {
     if (killed) return;
     killed = true;
     killReason = reason;
-    signalChildTree("SIGTERM");
+    // Arm the escalation timer BEFORE signalling: a child that closes
+    // synchronously inside the signal call runs clearAll(), which must see
+    // (and clear) this timer or it fires later and re-signals a dead child.
     escalationTimer = setTimeout(() => signalChildTree("SIGKILL"), killGraceMs);
+    signalChildTree("SIGTERM");
   };
 
   const clearIdleTimer = () => {

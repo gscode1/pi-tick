@@ -30,6 +30,7 @@ function createMockChild() {
   child.stdout = new EventEmitter();
   child.stderr = new EventEmitter();
   child.kill = (signal) => {
+    if (child.killedWith !== undefined) return; // a real child closes once
     child.killedWith = signal;
     child.emit("close", null, signal);
   };

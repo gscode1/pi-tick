@@ -4,11 +4,21 @@
 // imports: backends/index.mjs imports each backend, and each backend
 // imports path helpers from here.
 
-import { homedir } from "node:os";
-import { join } from "node:path";
+import { homedir, userInfo } from "node:os";
+import { join, resolve, sep } from "node:path";
 
 export function dataDir() {
-  return process.env.PI_TICK_DATA_DIR || join(homedir(), ".pi", "agent", "tick");
+  const dir = process.env.PI_TICK_DATA_DIR || join(homedir(), ".pi", "agent", "tick");
+  // Safety net (issue #23): under `node --test` (which sets NODE_TEST_CONTEXT
+  // in every test process) never resolve a data dir inside ~/.pi — that is
+  // the developer's real data. Tests must point PI_TICK_DATA_DIR at a temp dir.
+  if (process.env.NODE_TEST_CONTEXT) {
+    const real = join(userInfo().homedir, ".pi") + sep; // passwd home: ignores $HOME
+    if ((resolve(dir) + sep).startsWith(real)) {
+      throw new Error(`pi-tick: refusing to use real data dir ${dir} during tests; set PI_TICK_DATA_DIR to a temp dir`);
+    }
+  }
+  return dir;
 }
 
 export function logsDir() {
