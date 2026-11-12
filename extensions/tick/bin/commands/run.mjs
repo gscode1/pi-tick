@@ -9,6 +9,7 @@ import { parseFlags } from "../argv.mjs";
 import { fail } from "../errors.mjs";
 import { resolvePiPath, resolveNodePath, augmentedPath } from "../bin-resolve.mjs";
 import { runJob } from "../runner.mjs";
+import { getActiveRun } from "../run-registry.mjs";
 import { activeBackend } from "../backend-info.mjs";
 
 // A scheduler-fired one-shot may legitimately arrive slightly early (clock
@@ -111,6 +112,20 @@ export async function cmdRun(argv, { stdout = process.stdout, stderr = process.s
   // Load config before claiming: a bad config must never consume a one-shot
   // (issue #29). loadConfig falls back to defaults with a single warning.
   const config = loadConfig({ stderr });
+
+  // One run per job at a time (issue #26): the active file is keyed by job
+  // id, so a second run would hide the first from `list`/`kill`. A live run
+  // (runner and child both alive) refuses the start and records nothing.
+  // Manual: failure (exit 5) so the user notices. Scheduler: exit 0 — an
+  // overlapping tick is expected for long jobs and non-zero is only noise.
+  // Checked before claiming a one-shot so a refused start doesn't consume it.
+  // (A check-then-start window of a few ms remains between two simultaneous
+  // starts; accepted.)
+  const live = getActiveRun(id);
+  if (live) {
+    stderr.write(`pi-tick: job '${id}' is already running (run ${live.runId || "?"}, started ${live.startedAt || "?"}); not starting another\n`);
+    return trigger === "manual" ? 5 : 0;
+  }
 
   // Claim only after all pre-run validation succeeds. A failed validation
   // must leave the one-shot available for a later scheduled invocation.

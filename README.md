@@ -80,7 +80,7 @@ pi-tick delete nightly-recap
 | `pi-tick delete <id>` | Remove a job (also unloads its plist if enabled). |
 | `pi-tick enable <id>` | Register / re-register the launchd plist. Idempotent. |
 | `pi-tick disable <id>` | Unload the plist and rename it to `.plist.disabled`. |
-| `pi-tick run <id> [--manual]` | Fire a job. With `--manual` it runs even if the job is disabled; without it (scheduler path) disabled jobs are skipped with exit 0. |
+| `pi-tick run <id> [--manual]` | Fire a job. With `--manual` it runs even if the job is disabled; without it (scheduler path) disabled jobs are skipped with exit 0. Only one run per job at a time: a start while the job is already running is refused (exit 5 with `--manual`, exit 0 from the scheduler). SIGTERM/SIGINT to the runner kills pi's process tree and records the run as `terminated` (exit 143). |
 | `pi-tick log [id] [--limit N] [--failed] [--since <dur>]` | Tail the run log. `--failed` keeps only non-zero exits; `--since` keeps runs in the last `<dur>` (`30s`/`5m`/`2h`/`1d`). |
 | `pi-tick transcripts <id> [--limit N]` | List transcript files for a job, newest first. |
 | `pi-tick show <id> [--run N] [--tail M] [--raw] [--no-meta]` | Chat-style view of a transcript (default: latest). `--run N` picks the Nth most recent. `--tail M` keeps the last M assistant turns. `--raw` emits JSONL events, one per line (`event:` prefix for `jq` pipelines). `--no-meta` skips the run header. |
