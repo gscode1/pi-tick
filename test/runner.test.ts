@@ -144,6 +144,21 @@ test("runJob treats transcript setup failure as a failed run", async () => {
   assert.equal(res.transcriptPath, null);
 });
 
+test("runJob treats timeoutMs 0 as disabled (child outliving a tiny interval is not killed)", async () => {
+  let child;
+  const res = await runJob({ ...defaultJob, timeoutMs: 0 }, "external", {
+    ...getDefaultOptions(),
+    spawnFn: () => {
+      child = createMockChild();
+      setTimeout(() => child.emit("close", 0, null), 150);
+      return child;
+    },
+  });
+  assert.equal(res.exitCode, 0);
+  assert.equal(res.reason, "exit_code");
+  assert.equal(child.killedWith, undefined);
+});
+
 test("runJob - timeout", async () => {
   let child;
   const job = { ...defaultJob, timeoutMs: 50 };

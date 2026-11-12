@@ -207,6 +207,7 @@ function createRunControls(child, { timeoutMs, idleTimeoutMs, killGraceMs }) {
   };
 
   const armWallTimer = () => {
+    if (timeoutMs <= 0) return;
     wallTimer = setTimeout(() => killChild("timeout"), timeoutMs);
   };
 

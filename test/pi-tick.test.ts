@@ -1568,9 +1568,10 @@ test("cmdAdd allows --max-output-bytes 0 but rejects --kill-grace-ms 0", async (
     try {
       await withEnv(env, () => cmdAdd([
         "x", "--prompt", "p", "--cwd", "/tmp",
-        "--kind", "daily", "--time", "09:00", "--max-output-bytes", "0",
+        "--kind", "daily", "--time", "09:00", "--timeout-ms", "0", "--max-output-bytes", "0",
       ], { stdout: process.stdout as any, stderr: process.stderr as any }));
       const cat = JSON.parse(readFileSync(join(dir, "jobs.json"), "utf8"));
+      assert.equal(cat.jobs[0].timeoutMs, 0);
       assert.equal(cat.jobs[0].maxOutputBytes, 0);
       await assert.rejects(
         () => withEnv(env, () => cmdAdd([
@@ -2154,4 +2155,20 @@ test("pi-tick.mjs exports only dispatch and PiTickError, not tick-core's full in
     new URL("../extensions/tick/bin/pi-tick.mjs", import.meta.url).pathname
   );
   assert.deepEqual(Object.keys(mod).sort(), ["PiTickError", "dispatch"]);
+});
+
+test("scripts/sync-cli.mjs installs every bundle file into PI_TICK_DATA_DIR", async () => {
+  const { listBundleFiles, bundledPath } = await import("../extensions/tick/bundle.mjs");
+  await withTempDir(async (dir) => {
+    const script = join(dirname(bundledPath("pi-tick.mjs")), "..", "..", "..", "scripts", "sync-cli.mjs");
+    const r = spawnSync(process.execPath, [script], {
+      env: { ...process.env, PI_TICK_DATA_DIR: dir }, encoding: "utf8",
+    });
+    assert.equal(r.status, 0, r.stderr);
+    const files = listBundleFiles();
+    assert.ok(files.length > 10);
+    for (const rel of files) {
+      assert.ok(existsSync(join(dir, rel)), `missing installed ${rel}`);
+    }
+  });
 });

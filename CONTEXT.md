@@ -2,4 +2,4 @@
 
 ## Schedule
 
-A Job's cadence and timing rules: interval, daily, or weekly. The Schedule module owns construction, validation, normalization for Backend adapters, and next-fire calculation. Backend-specific rendering and constraints remain in each Backend adapter.
+A Job's cadence and timing rules: interval, daily, weekly, or once (a single absolute timestamp). The Schedule module owns construction, validation, normalization for Backend adapters, and next-fire calculation. Backend-specific rendering and constraints remain in each Backend adapter.

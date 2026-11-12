@@ -62,7 +62,7 @@ export async function createTick(params, { stdout = process.stdout, stderr = pro
     "max-output-bytes": params.maxOutputBytes,
     "kill-grace-ms": params.killGraceMs,
   };
-  const timeoutMs = flagOptionalU32(rt, "timeout-ms");
+  const timeoutMs = flagOptionalU32(rt, "timeout-ms", { allowZero: true });
   const idleTimeoutMs = flagOptionalU32(rt, "idle-timeout-ms", { allowZero: true });
   const maxOutputBytes = flagOptionalU32(rt, "max-output-bytes", { allowZero: true });
   const killGraceMs = flagOptionalU32(rt, "kill-grace-ms", { allowZero: false });
