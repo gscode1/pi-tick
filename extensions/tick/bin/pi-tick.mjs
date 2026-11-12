@@ -8,6 +8,7 @@ import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { basename } from "node:path";
 import { dispatch, PiTickError } from "./tick-core.mjs";
+import { enableTerminationHandling } from "./runner.mjs";
 
 // Re-export only what this wrapper itself needs (dispatch + the error class
 // it catches below) — not a blanket `export *` (issue #63). Anything that
@@ -36,6 +37,11 @@ if (isMainModule()) {
   // Subcommand argv: argv[0] is "node" or "pi-tick", argv[1] is the script,
   // argv[2] is the subcommand, rest are flags.
   const subargv = process.argv.slice(2);
+  // Standalone `pi-tick run` (launchd/cron/shell): on SIGTERM/SIGINT kill the
+  // child tree and record the run as "terminated" instead of orphaning pi.
+  // Deliberately NOT done in runJob/dispatch: the extension calls those
+  // in-process inside the user's pi session, which owns its own signals.
+  if (subargv[0] === "run") enableTerminationHandling();
   const stdout = process.stdout;
   const stderr = process.stderr;
   dispatch(subargv, { stdout, stderr })

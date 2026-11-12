@@ -10,7 +10,7 @@ import {
   TRANSCRIPT_FINAL_TEXT_PREVIEW, TRANSCRIPT_PRUNE_THROTTLE_MS,
   RUNTIME_DEFAULTS,
 } from "./catalog.mjs";
-import { writeActiveRun, clearActiveRun, killRequested } from "./run-registry.mjs";
+import { writeActiveRun, clearActiveRun, readKillRequest, processStart } from "./run-registry.mjs";
 import { runsFile } from "./paths.mjs";
 import { transcriptStartMs } from "./format.mjs";
 
@@ -192,6 +192,10 @@ function buildRunArgs(job, { defaultModel }) {
 // is clamped here: an absurdly long limit behaves as "~24.8 days" rather than
 // "1 ms". (Clamp rather than disable: the user asked for a limit.)
 const MAX_TIMER_MS = 2147483647;
+
+// After the child process exits, how long to keep reading its stdout/stderr
+// before giving up on them (a descendant may hold the pipes open) — issue #26.
+export const STREAM_DRAIN_MS = 2000;
 const clampDelay = (ms) => Math.min(ms, MAX_TIMER_MS);
 
 function createRunControls(child, { timeoutMs, idleTimeoutMs, killGraceMs }) {
@@ -246,7 +250,20 @@ function createRunControls(child, { timeoutMs, idleTimeoutMs, killGraceMs }) {
     if (escalationTimer) clearTimeout(escalationTimer);
   };
 
-  return { killChild, resetIdleTimer, armWallTimer, clearAll, getKillReason: () => killReason };
+  // The child process has exited: the wall/idle limits no longer apply (a
+  // run that already finished must not be relabelled `timeout` while a
+  // lingering descendant keeps a pipe open). The SIGKILL escalation stays
+  // armed so descendants that ignored SIGTERM still get killed.
+  const onChildExit = () => {
+    if (wallTimer) { clearTimeout(wallTimer); wallTimer = null; }
+    clearIdleTimer();
+  };
+
+  // Last-resort SIGKILL of the whole group, used at finalization when the run
+  // was killed/timed out so a TERM-ignoring descendant can't outlive it.
+  const forceKillGroup = () => signalChildTree("SIGKILL");
+
+  return { killChild, resetIdleTimer, armWallTimer, clearAll, onChildExit, forceKillGroup, getKillReason: () => killReason };
 }
 
 // Issue #56 — chunk.toString("utf8") + char-count slicing had two bugs: a
@@ -366,9 +383,11 @@ function buildRunRecord({
     reason = "spawn_error";
     error = `spawn failed: ${spawnErr.message}`;
   } else if (killReason) {
-    // "killed" = `pi-tick kill` (user-requested); the rest are runner-imposed
-    // limits. Exit code is 124 for limits, 143 (SIGTERM convention) for kills.
-    exitCode = killReason === "killed" ? 143 : 124;
+    // "killed" = `pi-tick kill` (user-requested); "terminated" = the runner
+    // process itself received SIGTERM/SIGINT; the rest are runner-imposed
+    // limits. Exit code is 124 for limits, 143 (SIGTERM convention) for
+    // kills and terminations.
+    exitCode = killReason === "killed" || killReason === "terminated" ? 143 : 124;
     reason = killReason;
     error = killReason;
   } else if (transcriptWriteError) {
@@ -471,6 +490,7 @@ async function updateLastRunAndPrune(jobId, record, { transcriptPath, finishedAt
 
 export async function runJob(job, trigger, options) {
   const { piPath, transcriptsDir, logsDir, spawnFn = spawn, stderr = process.stderr, envPath, defaultModel } = options;
+  const drainMs = Number.isFinite(options.drainMs) ? options.drainMs : STREAM_DRAIN_MS;
 
   const { isSlashCommand, args, effectiveModel } = buildRunArgs(job, { defaultModel });
 
@@ -533,8 +553,13 @@ export async function runJob(job, trigger, options) {
   // extension that's the user's whole pi session, never safe to kill.
   // `childPid` is the actual spawned pi process and is what /tick kill
   // targets (run-registry.mjs's killActiveRun never touches `pid`).
+  // `pidStart`/`childStart` (ps start times) let readers tell a recycled pid
+  // from the original process (issue #26).
   try {
-    writeActiveRun(job.id, { jobId: job.id, runId, startedAt, pid: process.pid, childPid: child.pid });
+    writeActiveRun(job.id, {
+      jobId: job.id, runId, startedAt, pid: process.pid, childPid: child.pid,
+      pidStart: processStart(process.pid), childStart: Number.isInteger(child.pid) ? processStart(child.pid) : null,
+    });
   } catch { /* best effort */ }
 
   let stderrBuf = "";
@@ -600,13 +625,34 @@ export async function runJob(job, trigger, options) {
   controls.armWallTimer();
   controls.resetIdleTimer();
 
+  // Register this run for runner-level termination (CLI entry only; see
+  // enableTerminationHandling) and resolve `finished` once the record is
+  // written, so a SIGTERM handler can wait for it before exiting.
+  let markFinished;
+  const finished = new Promise((r) => { markFinished = r; });
+  const handle = { terminate: () => controls.killChild("terminated"), finished };
+  liveRuns.add(handle);
+  syncSignalHandlers();
+
   return new Promise((resolve) => {
-    child.on("error", (err) => {
-      // Only a child that never spawned (no pid) is a spawn failure; later
-      // errors (e.g. a failed kill()) must not mask the real exit status.
-      if (!child.pid) spawnErr = err;
-    });
-    child.on("close", async (code, signal) => {
+    let exitInfo = null;      // { code, signal, at } from the child's 'exit'
+    let drainTimer = null;
+    let finalized = false;
+
+    // Single finalization path, reached from 'close' (all pipes drained) or,
+    // for a child that exited while a descendant still holds a pipe open,
+    // from the drain timer. `finalized` makes the record write exactly-once.
+    const finalize = async (code, signal) => {
+      if (finalized) return;
+      finalized = true;
+      if (drainTimer) { clearTimeout(drainTimer); drainTimer = null; }
+      const exitedAt = exitInfo ? exitInfo.at : Date.now();
+      // Stop reading: a lingering descendant must not keep the runner alive.
+      for (const s of [child.stdout, child.stderr]) {
+        try { if (s && typeof s.destroy === "function") s.destroy(); } catch { /* already closed */ }
+      }
+      const killReasonSoFar = controls.getKillReason();
+      if (killReasonSoFar) controls.forceKillGroup();
       controls.clearAll();
       rpc.clear();
 
@@ -627,9 +673,16 @@ export async function runJob(job, trigger, options) {
         try { transcriptBytes = statSync(transcriptPath).size; } catch { /* best effort */ }
       }
 
-      // Timeout/idle/output-cap reasons win; otherwise a kill marker written
-      // by `pi-tick kill` (run-registry.mjs) means the user stopped the run.
-      const killReason = controls.getKillReason() || (killRequested(job.id, runId) ? "killed" : null);
+      // Timeout/idle/output-cap/terminated reasons win; otherwise a kill
+      // marker written by `pi-tick kill` (run-registry.mjs) means the user
+      // stopped the run — but only if the child ended by signal or exited
+      // after the request, so a clean exit that finished BEFORE the kill
+      // was requested stays a normal result.
+      let killReason = killReasonSoFar;
+      if (!killReason) {
+        const requestedAt = readKillRequest(job.id, runId);
+        if (requestedAt !== null && (signal || exitedAt >= requestedAt)) killReason = "killed";
+      }
       const record = buildRunRecord({
         runId, jobId: job.id, triggerKind, startedAt, finishedAt,
         code, signal, spawnErr, killReason, transcriptWriteError,
@@ -643,6 +696,10 @@ export async function runJob(job, trigger, options) {
 
       await updateLastRunAndPrune(job.id, record, { transcriptPath, finishedAt, transcriptsDir, logsDir, stderr });
 
+      liveRuns.delete(handle);
+      syncSignalHandlers();
+      markFinished();
+
       resolve({
         exitCode: record.exitCode,
         reason: record.reason,
@@ -655,6 +712,61 @@ export async function runJob(job, trigger, options) {
         tokens: record.tokens,
         finalTextPreview: record.finalTextPreview,
       });
+    };
+
+    child.on("error", (err) => {
+      // Only a child that never spawned (no pid) is a spawn failure; later
+      // errors (e.g. a failed kill()) must not mask the real exit status.
+      if (!child.pid) spawnErr = err;
     });
+    // 'exit' fires when the process ends even if a descendant still holds
+    // stdout/stderr open (then 'close' would wait for it). Stop the wall/idle
+    // timers now, give the pipes a short drain window, then finalize.
+    child.on("exit", (code, signal) => {
+      exitInfo = { code, signal, at: Date.now() };
+      controls.onChildExit();
+      if (!finalized && !drainTimer) {
+        drainTimer = setTimeout(() => finalize(code, signal), drainMs);
+      }
+    });
+    child.on("close", (code, signal) => finalize(code, signal));
   });
+}
+
+// ─── Runner-level termination (CLI entry only) ──────────────────────────
+// `pi-tick run` as a standalone process must not orphan the detached pi
+// child (and leave a stale active file) when launchd/cron/the user sends the
+// runner SIGTERM/SIGINT. The signal handlers are process-global, so they are
+// opt-in: only the CLI entry (pi-tick.mjs) calls enableTerminationHandling().
+// When runJob runs in-process inside the user's pi session (the extension),
+// nothing is enabled and the session's own signal handling is untouched.
+// Even when enabled, the handlers exist only while at least one child is
+// running (syncSignalHandlers adds/removes them).
+const liveRuns = new Set();
+let terminationEnabled = false;
+let terminating = false;
+let installedHandlers = null;
+
+function onTerminationSignal(sig) {
+  if (terminating) return;
+  terminating = true;
+  for (const h of [...liveRuns]) h.terminate();
+  Promise.all([...liveRuns].map((h) => h.finished)).finally(() => {
+    process.exit(sig === "SIGINT" ? 130 : 143);
+  });
+}
+
+function syncSignalHandlers() {
+  const want = terminationEnabled && liveRuns.size > 0;
+  if (want && !installedHandlers) {
+    installedHandlers = { SIGTERM: () => onTerminationSignal("SIGTERM"), SIGINT: () => onTerminationSignal("SIGINT") };
+    for (const [sig, fn] of Object.entries(installedHandlers)) process.on(sig, fn);
+  } else if (!want && installedHandlers) {
+    for (const [sig, fn] of Object.entries(installedHandlers)) process.removeListener(sig, fn);
+    installedHandlers = null;
+  }
+}
+
+export function enableTerminationHandling() {
+  terminationEnabled = true;
 }
