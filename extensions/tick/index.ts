@@ -176,15 +176,53 @@ async function ensureLogsDir(): Promise<void> {
 const TICK_SUBCOMMANDS = ["list", "run", "kill", "enable", "disable", "delete", "log", "show"] as const;
 type TickSubcommand = (typeof TICK_SUBCOMMANDS)[number];
 
+// Split on whitespace, honouring single and double quotes (quotes are
+// removed, so `show "my job"` yields one token). No escape processing; an
+// unterminated quote runs to the end of the input.
+function tokenizeArgs(raw: string): string[] {
+  const tokens: string[] = [];
+  let cur = "";
+  let has = false;
+  let quote: string | null = null;
+  for (const ch of raw) {
+    if (quote) {
+      if (ch === quote) quote = null;
+      else cur += ch;
+    } else if (ch === '"' || ch === "'") {
+      quote = ch;
+      has = true;
+    } else if (/\s/.test(ch)) {
+      if (has) { tokens.push(cur); cur = ""; has = false; }
+    } else {
+      cur += ch;
+      has = true;
+    }
+  }
+  if (has) tokens.push(cur);
+  return tokens;
+}
+
 function parseTickArgs(raw: string): { sub: TickSubcommand | null; rest: string[] } {
   const trimmed = raw.trim();
   if (trimmed === "") return { sub: null, rest: [] };
-  const parts = trimmed.split(/\s+/);
+  const parts = tokenizeArgs(trimmed);
   const first = parts[0];
   if ((TICK_SUBCOMMANDS as readonly string[]).includes(first)) {
     return { sub: first as TickSubcommand, rest: parts.slice(1) };
   }
   return { sub: null, rest: parts };
+}
+
+// Notification text for a CLI call that exited 0. Never falls back to a
+// canned success message when the CLI printed to stderr (e.g. "no such job"):
+// stdout wins, stderr is appended, and stderr alone is shown as a warning.
+function resultNotice(res: CliResult, fallback: string): { text: string; level: "info" | "warning" } {
+  const out = res.stdout.trim();
+  const err = res.stderr.trim();
+  if (out && err) return { text: `${out}\n${err}`, level: "info" };
+  if (out) return { text: out, level: "info" };
+  if (err) return { text: err, level: "warning" };
+  return { text: fallback, level: "info" };
 }
 
 async function getJobIds(pi: ExtensionAPI): Promise<string[]> {
@@ -230,7 +268,10 @@ export default function (pi: ExtensionAPI): void {
     getArgumentCompletions: async (prefix) => {
       // /tick <prefix>
       const args = parseTickArgs(prefix);
-      if (args.sub === null) {
+      // A bare subcommand still being typed (`run`, no trailing space) is
+      // completed as a subcommand, not as an id list.
+      const stillTypingSub = args.sub !== null && args.rest.length === 0 && !/\s$/.test(prefix);
+      if (args.sub === null || stillTypingSub) {
         // Completing the subcommand itself.
         const filtered = TICK_SUBCOMMANDS.filter((s) => s.startsWith(prefix.trim()));
         return filtered.length > 0
@@ -263,8 +304,8 @@ export default function (pi: ExtensionAPI): void {
           ctx.ui.notify(`pi-tick list failed: ${res.stderr.trim() || `exit ${res.code}`}`, "error");
           return;
         }
-        const out = res.stdout.trim() || "(no jobs)";
-        ctx.ui.notify(out, "info");
+        const n = resultNotice(res, "(no jobs)");
+        ctx.ui.notify(n.text, n.level);
         return;
       }
       if (parsed.sub === "run") {
@@ -279,7 +320,8 @@ export default function (pi: ExtensionAPI): void {
           ctx.ui.notify(`pi-tick run ${id} failed: ${res.stderr.trim() || `exit ${res.code}`}`, "error");
           return;
         }
-        ctx.ui.notify(`Job '${id}' finished (exit ${res.code})`, "info");
+        const n = resultNotice({ ...res, stdout: "" }, `Job '${id}' finished (exit ${res.code})`);
+        ctx.ui.notify(n.level === "warning" ? `Job '${id}' finished (exit ${res.code}): ${n.text}` : n.text, n.level);
         return;
       }
       if (parsed.sub === "kill") {
@@ -293,7 +335,8 @@ export default function (pi: ExtensionAPI): void {
           ctx.ui.notify(`pi-tick kill ${id} failed: ${res.stderr.trim() || `exit ${res.code}`}`, "error");
           return;
         }
-        ctx.ui.notify(res.stdout.trim() || `killed job '${id}'`, "info");
+        const n = resultNotice(res, `killed job '${id}'`);
+        ctx.ui.notify(n.text, n.level);
         return;
       }
       if (parsed.sub === "enable") {
@@ -307,7 +350,8 @@ export default function (pi: ExtensionAPI): void {
           ctx.ui.notify(`pi-tick enable ${id} failed: ${res.stderr.trim() || `exit ${res.code}`}`, "error");
           return;
         }
-        ctx.ui.notify(res.stdout.trim() || `enabled job '${id}'`, "info");
+        const n = resultNotice(res, `enabled job '${id}'`);
+        ctx.ui.notify(n.text, n.level);
         return;
       }
       if (parsed.sub === "disable") {
@@ -321,7 +365,8 @@ export default function (pi: ExtensionAPI): void {
           ctx.ui.notify(`pi-tick disable ${id} failed: ${res.stderr.trim() || `exit ${res.code}`}`, "error");
           return;
         }
-        ctx.ui.notify(res.stdout.trim() || `disabled job '${id}'`, "info");
+        const n = resultNotice(res, `disabled job '${id}'`);
+        ctx.ui.notify(n.text, n.level);
         return;
       }
       if (parsed.sub === "delete") {
@@ -335,7 +380,8 @@ export default function (pi: ExtensionAPI): void {
           ctx.ui.notify(`pi-tick delete ${id} failed: ${res.stderr.trim() || `exit ${res.code}`}`, "error");
           return;
         }
-        ctx.ui.notify(res.stdout.trim() || `deleted job '${id}'`, "info");
+        const n = resultNotice(res, `deleted job '${id}'`);
+        ctx.ui.notify(n.text, n.level);
         return;
       }
       if (parsed.sub === "show" && !parsed.rest[0]) {
@@ -348,7 +394,8 @@ export default function (pi: ExtensionAPI): void {
           ctx.ui.notify(`pi-tick ${parsed.sub} failed: ${res.stderr.trim() || `exit ${res.code}`}`, "error");
           return;
         }
-        ctx.ui.notify(res.stdout.trim() || "(no output)", "info");
+        const n = resultNotice(res, "(no output)");
+        ctx.ui.notify(n.text, n.level);
         return;
       }
     },
