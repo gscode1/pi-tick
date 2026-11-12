@@ -427,3 +427,60 @@ test("runJob records permission failure without interpreting a nonexecutable lau
   assert.equal(result.reason, "spawn_error");
   assert.match(result.error, /EACCES/);
 });
+
+// ─── Issues #20 / #21 ───────────────────────────────────────────────────
+function writeShStub(name: string, body: string): string {
+  const p = join(tempDir, name);
+  writeFileSync(p, `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+  return p;
+}
+
+test("runJob never arms a timer above 2^31-1 ms (legacy 4294967295 catalog value)", async () => {
+  const piPath = writeShStub("slow-pi-legacy", "sleep 0.3\nexit 0");
+  const res = await runJob(
+    { ...defaultJob, id: "legacy-limits", timeoutMs: 4294967295, idleTimeoutMs: 4294967295, killGraceMs: 4294967295 },
+    "manual",
+    { ...getDefaultOptions(), piPath, envPath: "/usr/bin:/bin" },
+  );
+  assert.equal(res.reason, "exit_code", res.error ?? "");
+  assert.equal(res.exitCode, 0);
+});
+
+test("runJob survives EPIPE on stdin for slash-command jobs", async () => {
+  const piPath = writeShStub("epipe-pi", "exec 0<&-\nsleep 0.5\nexit 0");
+  for (let i = 0; i < 3; i++) {
+    const res = await runJob(
+      { ...defaultJob, id: `epipe-${i}`, prompt: "/cmd x" },
+      "manual",
+      { ...getDefaultOptions(), piPath, envPath: "/usr/bin:/bin" },
+    );
+    assert.equal(res.exitCode, 0, res.error ?? "");
+    assert.equal(res.reason, "exit_code");
+  }
+});
+
+test("runJob parses a final stdout line without a trailing newline", async () => {
+  const line = JSON.stringify({ type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: "boom" } });
+  const piPath = writeShStub("nonl-pi", `printf '%s' '${line}'\nexit 0`);
+  const res = await runJob({ ...defaultJob, id: "no-trailing-nl" }, "manual", {
+    ...getDefaultOptions(), piPath, envPath: "/usr/bin:/bin",
+  });
+  assert.equal(res.reason, "model_error");
+});
+
+test("runJob: a child 'error' after spawn is not recorded as spawn_error", async () => {
+  const res = await runJob(defaultJob, "external", {
+    ...getDefaultOptions(),
+    spawnFn: () => {
+      const child = createMockChild();
+      child.pid = 999999; // spawned: has a pid (never signalled in this test)
+      setTimeout(() => {
+        child.emit("error", new Error("kill failed"));
+        child.emit("close", 0, null);
+      }, 10);
+      return child;
+    },
+  });
+  assert.equal(res.exitCode, 0);
+  assert.equal(res.reason, "exit_code");
+});
