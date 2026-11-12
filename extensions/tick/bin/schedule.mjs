@@ -108,7 +108,66 @@ export function validateInterval(minutes, seconds, offsetMinutes, offsetSeconds)
   if (!Number.isFinite(os) || os < 0 || !Number.isInteger(os)) {
     fail(`--offset-seconds must be a non-negative integer (got '${String(offsetSeconds)}')`, 2);
   }
-  return { minutes: m, seconds: s, offset: { minutes: om, seconds: os } };
+  const value = { minutes: m, seconds: s, offset: { minutes: om, seconds: os } };
+  // Reject schedules the active backend cannot render now (add time), not at
+  // enable time, with the backend's own message.
+  const problem = activeBackend().scheduleError?.({ kind: KIND_INTERVAL, value });
+  if (problem) fail(problem, 2);
+  return value;
+}
+
+// ─── Calendar form of an interval schedule ───────────────────────────────
+// Neither launchd (StartInterval has no phase) nor cron (fields restart each
+// hour/day) can express an arbitrary "every N minutes starting at offset X".
+// Both can express it when the cadence tiles the wall clock evenly:
+//   - N minutes with 60 % N === 0   -> a minute list, every hour
+//   - N a whole number of hours H with 24 % H === 0 -> an hour list at one minute
+// The offset (whole minutes, < the interval) picks the phase. This single
+// helper is the shared definition used by both backends and by next-fire.
+export const CALENDAR_INTERVAL_HINT =
+  "supported with an offset: 1, 2, 3, 4, 5, 6, 10, 12, 15, 20 or 30 minutes, or 1, 2, 3, 4, 6, 8, 12 or 24 hours";
+
+// Returns { minutes: number[], hours: number[] | null } (hours null = every
+// hour) or { error } when the interval/offset has no calendar form.
+export function intervalCalendarForm(totalSeconds, offsetSeconds = 0) {
+  if (!Number.isInteger(totalSeconds) || totalSeconds <= 0 || totalSeconds % 60 !== 0) {
+    return { error: `interval ${totalSeconds}s is not a whole number of minutes` };
+  }
+  if (!Number.isInteger(offsetSeconds) || offsetSeconds < 0 || offsetSeconds % 60 !== 0) {
+    return { error: `offset ${offsetSeconds}s is not a whole number of minutes` };
+  }
+  const M = totalSeconds / 60;
+  const off = offsetSeconds / 60;
+  if (off >= M) {
+    return { error: `offset ${off}m must be smaller than the interval (${M}m)` };
+  }
+  if (60 % M === 0) {
+    const minutes = [];
+    for (let m = off % M; m < 60; m += M) minutes.push(m);
+    return { minutes, hours: null };
+  }
+  if (M % 60 === 0 && 24 % (M / 60) === 0) {
+    const H = M / 60;
+    const hours = [];
+    for (let h = Math.floor(off / 60); h < 24; h += H) hours.push(h);
+    return { minutes: [off % 60], hours };
+  }
+  return { error: `interval ${M}m has no calendar form (${CALENDAR_INTERVAL_HINT})` };
+}
+
+function nextCalendarFormAt(now, form) {
+  const t = new Date(now);
+  t.setSeconds(0, 0);
+  t.setMinutes(t.getMinutes() + 1);
+  // Walk real minutes forward; a day's worth always contains a match. This
+  // uses local wall-clock fields, like the backends do.
+  for (let i = 0; i < 24 * 60 + 61; i++) {
+    if (form.minutes.includes(t.getMinutes()) && (form.hours === null || form.hours.includes(t.getHours()))) {
+      return t.toISOString();
+    }
+    t.setMinutes(t.getMinutes() + 1);
+  }
+  return null;
 }
 
 export function buildSchedule(kind, opts) {
@@ -216,8 +275,20 @@ export function nextFireAt(schedule, now = new Date()) {
   const s = schedule;
   if (s.kind === KIND_INTERVAL) {
     const total = s.value.minutes * 60 + s.value.seconds;
-    const _off = s.value.offset ?? { minutes: 0, seconds: 0 };
-    void _off;
+    const off = s.value.offset ?? { minutes: 0, seconds: 0 };
+    const offSeconds = off.minutes * 60 + off.seconds;
+    // Calendar-form jobs fire at fixed wall-clock times: always with an offset
+    // (launchd renders StartCalendarInterval), and also without one on cron
+    // (`*/N`, `0 */H`). Compute the true next match.
+    if (offSeconds > 0 || activeBackend().name === "cron") {
+      const form = intervalCalendarForm(total, offSeconds);
+      if (!form.error) {
+        const at = nextCalendarFormAt(now, form);
+        if (at) return at;
+      }
+    }
+    // Plain StartInterval (launchd, no offset): launchd counts from load/last
+    // run, so now + interval is only an approximation.
     const next = new Date(now.getTime() + total * 1000);
     return next.toISOString();
   }

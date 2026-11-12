@@ -19,7 +19,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 
 import { logsDir as defaultLogsDir } from "../paths.mjs";
-import { resolveScheduleFields } from "../schedule.mjs";
+import { resolveScheduleFields, intervalCalendarForm, CALENDAR_INTERVAL_HINT } from "../schedule.mjs";
 
 const LABEL_PREFIX = "dev.pi.tick.";
 
@@ -46,6 +46,18 @@ export function disabledPlistPath(jobId) {
 
 function userUid() {
   return process.getuid ? process.getuid() : 0;
+}
+
+// Returns an error string when launchd cannot render this interval faithfully.
+// Without an offset StartInterval is used as-is. With an offset the schedule
+// must have a calendar form (see intervalCalendarForm).
+function intervalError(fields) {
+  if (fields.offsetSeconds === 0) return null;
+  const form = intervalCalendarForm(fields.totalSeconds, fields.offsetSeconds);
+  if (form.error) {
+    return `launchd cannot render this interval offset: ${form.error} (offsets must be whole minutes smaller than the interval; ${CALENDAR_INTERVAL_HINT})`;
+  }
+  return null;
 }
 
 export function renderPlist(job, opts) {
@@ -80,17 +92,23 @@ export function renderPlist(job, opts) {
 
   let scheduleKeys = "";
   if (job.schedule.kind === "interval") {
-    scheduleKeys = `  <key>StartInterval</key>\n  <integer>${fields.totalSeconds}</integer>\n`;
-    // Phase offset: a single StartCalendarInterval fires once at
-    // `Date.now() + offset` so two interval jobs of the same cadence
-    // don't race. Target = now + offset in wall-clock time; emit its
-    // Minute/Second directly (they're already bounded 0..59). Drift
-    // is bounded by the sub-second granularity of Date.now() — for
-    // any offset ≥ 5s the effective drift is < 1s. The phase is set
-    // at this render call, so re-running `pi-tick enable` shifts it.
-    if (fields.offsetSeconds > 0) {
-      const target = new Date(Date.now() + fields.offsetSeconds * 1000);
-      scheduleKeys += `  <key>StartCalendarInterval</key>\n  <dict>\n    <key>Minute</key>\n    <integer>${target.getMinutes()}</integer>\n    <key>Second</key>\n    <integer>${target.getSeconds()}</integer>\n  </dict>\n`;
+    const err = intervalError(fields);
+    if (err) throw new Error(err);
+    if (fields.offsetSeconds === 0) {
+      scheduleKeys = `  <key>StartInterval</key>\n  <integer>${fields.totalSeconds}</integer>\n`;
+    } else {
+      // StartInterval has no phase, and launchd honours StartInterval and
+      // StartCalendarInterval independently, so an offset job is rendered as
+      // StartCalendarInterval ONLY (never both keys).
+      const form = intervalCalendarForm(fields.totalSeconds, fields.offsetSeconds);
+      const dicts = [];
+      for (const h of form.hours ?? [null]) {
+        for (const m of form.minutes) {
+          const hourKey = h === null ? "" : `    <key>Hour</key>\n    <integer>${h}</integer>\n`;
+          dicts.push(`  <dict>\n${hourKey}    <key>Minute</key>\n    <integer>${m}</integer>\n  </dict>`);
+        }
+      }
+      scheduleKeys = `  <key>StartCalendarInterval</key>\n  <array>\n${dicts.join("\n")}\n  </array>\n`;
     }
   } else if (job.schedule.kind === "daily") {
     scheduleKeys = `  <key>StartCalendarInterval</key>\n  <dict>\n    <key>Hour</key>\n    <integer>${fields.hour}</integer>\n    <key>Minute</key>\n    <integer>${fields.minute}</integer>\n  </dict>\n`;
@@ -171,6 +189,10 @@ function bootstrap(jobId) {
 export const launchdBackend = {
   name: "launchd",
   minimumIntervalSeconds: 5,
+  scheduleError: (schedule) => {
+    if (schedule.kind !== "interval") return null;
+    return intervalError(resolveScheduleFields(schedule));
+  },
   label: (jobId) => `${LABEL_PREFIX}${jobId}`,
   listRegistered: async () => {
     // Read every plist in the LaunchAgents dir and return jobIds we own.
@@ -184,6 +206,8 @@ export const launchdBackend = {
     return out;
   },
   register: async (job, opts) => {
+    const problem = launchdBackend.scheduleError(job.schedule);
+    if (problem) return { ok: false, error: problem };
     const plist = renderPlist(job, {
       nodePath: opts.nodePath,
       cliPath: opts.cliPath,

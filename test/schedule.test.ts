@@ -47,8 +47,8 @@ test("validateInterval enforces minimum 5 seconds", () => {
 });
 
 test("validateInterval accepts offset fields and returns them on the value", () => {
-  const v = validateInterval(2, 0, 15, 30);
-  assert.deepEqual(v, { minutes: 2, seconds: 0, offset: { minutes: 15, seconds: 30 } });
+  const v = validateInterval(30, 0, 15, 0);
+  assert.deepEqual(v, { minutes: 30, seconds: 0, offset: { minutes: 15, seconds: 0 } });
   const v0 = validateInterval(2, 0, 0, 0);
   assert.deepEqual(v0, { minutes: 2, seconds: 0, offset: { minutes: 0, seconds: 0 } });
   // Bare flag (parseFlags returns `true`) is rejected with a clear message.
@@ -105,13 +105,13 @@ test("buildSchedule for interval validates total ≥ 5s", () => {
 
 test("buildSchedule interval passes offset through to validateInterval", () => {
   const s = buildSchedule("interval", {
-    minutes: 2,
+    minutes: 30,
     seconds: 0,
     "offset-minutes": 15,
     "offset-seconds": 0,
   });
   assert.equal(s.kind, "interval");
-  assert.deepEqual(s.value, { minutes: 2, seconds: 0, offset: { minutes: 15, seconds: 0 } });
+  assert.deepEqual(s.value, { minutes: 30, seconds: 0, offset: { minutes: 15, seconds: 0 } });
 });
 
 test("buildSchedule rejects unknown kind", () => {

@@ -261,73 +261,6 @@ test("augmentedPath: a minimal launchd PATH gains the tool dirs it was missing",
 
 // ─── Interval offset (issue 22) ──────────────────────────────────────────
 
-test("renderPlist: interval with offset adds StartCalendarInterval for wall-clock first fire", () => {
-  // Compute the expected wall-clock target = now + offset. renderPlist
-  // reads Date.now() at render time, so we sample the boundary just
-  // before/after and assert the plist lands within ±1 second of either
-  // — the only drift source is the time between the two Date.now()
-  // calls, which is sub-millisecond on any modern machine.
-  const offsetMin = 15;
-  const offsetSec = 30;
-  const offsetMs = offsetMin * 60_000 + offsetSec * 1000;
-  const tBefore = Date.now();
-  const job = makeJob({
-    id: "phase",
-    scheduleKind: "interval",
-    scheduleValue: { minutes: 2, seconds: 0, offset: { minutes: offsetMin, seconds: offsetSec } },
-  });
-  const plist = renderPlist(job, { nodePath: "/n", cliPath: "/c" });
-  const tAfter = Date.now();
-
-  // StartInterval must still be the unphased cadence (120s for minutes:2, seconds:0).
-  assert.match(plist, /<key>StartInterval<\/key>\s*<integer>120<\/integer>/);
-  // StartCalendarInterval must be present.
-  assert.match(plist, /<key>StartCalendarInterval<\/key>/);
-  assert.match(plist, /<key>Minute<\/key>/);
-  assert.match(plist, /<key>Second<\/key>/);
-
-  // Extract the emitted Minute/Second integers.
-  const m = plist.match(/<key>Minute<\/key>\s*<integer>(\d+)<\/integer>/);
-  const s = plist.match(/<key>Second<\/key>\s*<integer>(\d+)<\/integer>/);
-  assert.ok(m && s, `plist missing Minute/Second integers:\n${plist}`);
-
-  // The plist's minute/second must equal new Date(now + offsetMs) for
-  // some `now` in [tBefore, tAfter]. Equivalently, allow ±1s drift on
-  // the second boundary (the minute rarely drifts within a single render).
-  const candidates = [new Date(tBefore + offsetMs), new Date(tAfter + offsetMs)];
-  const expectMin = candidates[0].getMinutes();
-  const expectSec = candidates[0].getSeconds();
-  const altSec = candidates[1].getSeconds();
-  const altMin = candidates[1].getMinutes();
-  const emittedMin = Number(m[1]);
-  const emittedSec = Number(s[1]);
-  const minOk = emittedMin === expectMin || emittedMin === altMin;
-  const secOk = emittedSec === expectSec || emittedSec === altSec;
-  assert.ok(minOk, `emitted Minute=${emittedMin} not in {${expectMin},${altMin}}; now=${new Date().toISOString()}`);
-  assert.ok(secOk, `emitted Second=${emittedSec} not in {${expectSec},${altSec}}; now=${new Date().toISOString()}`);
-});
-
-test("renderPlist: two interval jobs of the same cadence with different offsets get distinct first-fires", () => {
-  const a = makeJob({
-    id: "a",
-    scheduleKind: "interval",
-    scheduleValue: { minutes: 2, seconds: 0, offset: { minutes: 0, seconds: 0 } },
-  });
-  const b = makeJob({
-    id: "b",
-    scheduleKind: "interval",
-    scheduleValue: { minutes: 2, seconds: 0, offset: { minutes: 15, seconds: 0 } },
-  });
-  const plistA = renderPlist(a, { nodePath: "/n", cliPath: "/c" });
-  const plistB = renderPlist(b, { nodePath: "/n", cliPath: "/c" });
-  // StartInterval is identical (the cadence is unchanged by the offset).
-  assert.match(plistA, /<key>StartInterval<\/key>\s*<integer>120<\/integer>/);
-  assert.match(plistB, /<key>StartInterval<\/key>\s*<integer>120<\/integer>/);
-  // Only the offset job emits StartCalendarInterval.
-  assert.doesNotMatch(plistA, /StartCalendarInterval/);
-  assert.match(plistB, /StartCalendarInterval/);
-});
-
 test("renderPlist: no-offset interval is byte-identical to the pre-offset plist", () => {
   // Hard-coded snapshot of a 2m interval plist with no offset. Any
   // whitespace change in renderPlist will fail this string-equal
@@ -384,24 +317,6 @@ test("renderPlist: interval with explicit 0/0 offset is byte-identical to omitte
   assert.equal(plistImplicit, plistExplicit);
 });
 
-test("renderPlist: interval with offset ≥ 60s rolls correctly via Date math", () => {
-  // 75 minutes from now → Date.getMinutes()/getSeconds() are bounded
-  // 0..59 so the rendered Minute/Second always land in range. We just
-  // assert the plist is structurally well-formed; the previous test
-  // pins the wall-clock target semantics.
-  const job = makeJob({
-    id: "big",
-    scheduleKind: "interval",
-    scheduleValue: { minutes: 2, seconds: 0, offset: { minutes: 75, seconds: 0 } },
-  });
-  const plist = renderPlist(job, { nodePath: "/n", cliPath: "/c" });
-  const m = plist.match(/<key>Minute<\/key>\s*<integer>(\d+)<\/integer>/);
-  const s = plist.match(/<key>Second<\/key>\s*<integer>(\d+)<\/integer>/);
-  assert.ok(m && s);
-  assert.ok(Number(m[1]) >= 0 && Number(m[1]) <= 59, `Minute out of range: ${m[1]}`);
-  assert.ok(Number(s[1]) >= 0 && Number(s[1]) <= 59, `Second out of range: ${s[1]}`);
-});
-
 test("formatSchedule: interval with no offset returns 'every Xm' (humanized display)", () => {
   // Old-shape value (no offset key) — human-readable display above 60s.
   const s = { kind: "interval", value: { minutes: 2, seconds: 0 } };
@@ -443,13 +358,12 @@ test("cmdAdd persists the offset when --offset-minutes/--offset-seconds are set"
         "--prompt", "p",
         "--cwd", "/tmp",
         "--kind", "interval",
-        "--minutes", "2",
+        "--minutes", "30",
         "--offset-minutes", "15",
-        "--offset-seconds", "30",
       ], { stdout: process.stdout as any, stderr: process.stderr as any }));
       assert.equal(code, 0);
       const cat = JSON.parse(readFileSync(join(dir, "jobs.json"), "utf8"));
-      assert.deepEqual(cat.jobs[0].schedule.value.offset, { minutes: 15, seconds: 30 });
+      assert.deepEqual(cat.jobs[0].schedule.value.offset, { minutes: 15, seconds: 0 });
     } finally {
       teardownEnv(env);
     }
@@ -511,7 +425,7 @@ test("tick_create-style argv: --offset-minutes 15 persists offset, --offset-seco
         "--prompt", "p",
         "--cwd", "/tmp",
         "--kind", "interval",
-        "--minutes", "2",
+        "--minutes", "30",
         "--offset-minutes", "15",
       ], { stdout: process.stdout as any, stderr: process.stderr as any }));
       const cat = JSON.parse(readFileSync(join(dir, "jobs.json"), "utf8"));
