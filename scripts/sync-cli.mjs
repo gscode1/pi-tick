@@ -10,33 +10,16 @@
 // In production, the extension's session_start handler does this same
 // copy. This script just makes the dev loop faster.
 
-import { copyFileSync, existsSync, statSync, chmodSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
-import { dirname, join, resolve, basename } from "node:path";
-import { fileURLToPath } from "node:url";
-import { backendsDir, dataDir, installedPathsPath, installedCorePath } from "../extensions/tick/bin/paths.mjs";
+import { copyFileSync, existsSync, chmodSync, mkdirSync, readFileSync } from "node:fs";
+import { dirname } from "node:path";
+import { bundledPath, installedPath, listBundleFiles } from "../extensions/tick/bundle.mjs";
 
-const here = dirname(fileURLToPath(import.meta.url));
-const pkgRoot = resolve(here, "..");
-const src = join(pkgRoot, "extensions", "tick", "bin", "pi-tick.mjs");
-const coreSrc = join(pkgRoot, "extensions", "tick", "bin", "tick-core.mjs");
-const backendsSrc = join(pkgRoot, "extensions", "tick", "bin", "backends");
-const pathsSrc = join(pkgRoot, "extensions", "tick", "bin", "paths.mjs");
-const runnerSrc = join(pkgRoot, "extensions", "tick", "bin", "runner.mjs");
-const catalogSrc = join(pkgRoot, "extensions", "tick", "bin", "catalog.mjs");
-
-if (!existsSync(src)) {
-  process.stderr.write(`sync-cli: bundled CLI not found at ${src}\n`);
+const files = listBundleFiles();
+const cliSource = bundledPath("pi-tick.mjs");
+if (!existsSync(cliSource)) {
+  process.stderr.write(`sync-cli: bundled CLI not found at ${cliSource}\n`);
   process.exit(1);
 }
-
-// Stable path: respect PI_TICK_DATA_DIR (used by tests), default to the real one.
-const dataDirValue = dataDir();
-const dest = join(dataDirValue, "pi-tick.mjs");
-const coreDest = installedCorePath();
-const backendsDest = backendsDir();
-const pathsDest = installedPathsPath();
-const runnerDest = join(dataDirValue, "runner.mjs");
-const catalogDest = join(dataDirValue, "catalog.mjs");
 
 function syncOne(srcPath, destPath) {
   if (!existsSync(srcPath)) return false;
@@ -56,24 +39,11 @@ function syncOne(srcPath, destPath) {
   return needsWrite;
 }
 
-const cliChanged = syncOne(src, dest);
-const coreChanged = syncOne(coreSrc, coreDest);
-const pathsChanged = syncOne(pathsSrc, pathsDest);
-const runnerChanged = syncOne(runnerSrc, runnerDest);
-const catalogChanged = syncOne(catalogSrc, catalogDest);
-
-// Sync the backends/ subdirectory. The dir may not exist yet on a fresh
-// install.
-let backendsChanged = false;
-if (existsSync(backendsSrc)) {
-  mkdirSync(backendsDest, { recursive: true, mode: 0o700 });
-  for (const f of readdirSync(backendsSrc)) {
-    if (f.endsWith(".mjs")) {
-      if (syncOne(join(backendsSrc, f), join(backendsDest, f))) backendsChanged = true;
-    }
-  }
+let changed = false;
+for (const rel of files) {
+  if (syncOne(bundledPath(rel), installedPath(rel))) changed = true;
 }
 
-const verb = (cliChanged || coreChanged || pathsChanged || runnerChanged || catalogChanged || backendsChanged) ? "synced" : "up-to-date";
-process.stdout.write(`sync-cli: ${verb} ${dest}\n`);
+const verb = changed ? "synced" : "up-to-date";
+process.stdout.write(`sync-cli: ${verb} ${installedPath("pi-tick.mjs")}\n`);
 

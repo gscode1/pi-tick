@@ -7,7 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `--timeout-ms 0` (and `timeoutMs: 0`) disables the per-job wall-clock
+  timeout. The default remains 30 minutes.
+
 ### Fixed
+- `scripts/sync-cli.mjs` now syncs every bundle file (via `listBundleFiles()`),
+  not a hand-maintained subset, so the dev sync no longer leaves the installed
+  CLI stale.
 - Execute the Pi launcher directly so Homebrew shell wrappers, npm shebang
   entry points, and native executables work under launchd and cron. Arguments
   remain separate and are never interpolated into a shell command.
