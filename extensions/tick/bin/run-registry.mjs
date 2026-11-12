@@ -58,6 +58,13 @@ export function writeActiveRun(jobId, rec) {
   writeAtomic(activeRunPath(jobId), rec);
 }
 
+// True when `pi-tick kill` flagged this run before signalling it, so the
+// owning runner can record reason "killed" rather than a generic exit_code.
+export function killRequested(jobId, runId) {
+  const rec = readActiveRun(jobId);
+  return !!(rec && rec.runId === runId && rec.killRequested);
+}
+
 export function findRunningProcess(jobId) {
   const r = spawnSync("ps", ["-x", "-o", "pid=,etime=,command="], { encoding: "utf8" });
   if (r.status !== 0 || !r.stdout) return null;
@@ -122,6 +129,11 @@ export async function killActiveRun(jobId, { graceMs = 5000, pollMs = 100 } = {}
     clearActiveRun(jobId, rec.runId);
     return { ok: true, pid, alreadyDead: true };
   }
+
+  // Mark the run as user-killed BEFORE signalling: the runner process
+  // reads this when the child exits (the SIGTERM is sent to the child, so
+  // the runner can't otherwise tell a kill from an ordinary failure).
+  try { writeActiveRun(jobId, { ...rec, killRequested: true }); } catch { /* best effort */ }
 
   signalProcessTree(pid, "SIGTERM");
   const deadline = Date.now() + graceMs;
