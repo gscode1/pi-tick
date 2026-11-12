@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- Runtime limits (`--timeout-ms`, `--idle-timeout-ms`, `--kill-grace-ms`, `--max-output-bytes`) reject empty, non-integer and out-of-range values; timer delays are capped at 2^31-1 ms so huge values no longer fire after ~1 ms (#20).
+- The runner no longer crashes with EPIPE when pi closes stdin early on slash-command jobs, parses a final stdout line without a trailing newline, and records `spawn_error` only when the child never started (#21).
+- Catalog lock: stale-lock reaping is serialized and identity-checked, and a holder only releases its own lock, so concurrent runs no longer lose catalog updates (#22).
+- The test suite no longer writes run records into the real `~/.pi/agent/tick/runs.jsonl`; tests refuse to use a data directory under the real `~/.pi` (#23).
+
 ## [0.1.5] - 2026-11-12
 
 ### Changed
