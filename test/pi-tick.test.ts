@@ -1079,13 +1079,76 @@ test("cmdRun on a non-existent job exits 4", async () => {
   });
 });
 
-test("cmdRun on a disabled job exits 0 with a 'not running' message", async () => {
+async function seedDisabled(env: any, dir: string, piStub: string, extra: any = {}) {
+  const catMod = await import(new URL("../extensions/tick/bin/catalog.mjs", import.meta.url).pathname);
+  await withEnv(env, () => {
+    const cat = catMod.loadCatalog();
+    cat.jobs.push({
+      id: "d", prompt: "p", cwd: dir, schedule: { kind: "interval", value: { minutes: 1, seconds: 0 } },
+      enabled: false, model: null, piPath: piStub, createdAt: "x", updatedAt: "x", lastRun: null, ...extra,
+    });
+    catMod.saveCatalog(cat);
+  });
+  return catMod;
+}
+
+test("cmdRun external (scheduler) run of a disabled job is skipped, exits 0, records no run", async () => {
   await withTempDir(async (dir) => {
     const env = setupEnv({ dataDir: dir, plistDir: join(dir, "agents") });
+    const piStub = writeStub(env, "pi", mockPi());
     try {
-      await withEnv(env, () => cmdAdd(["d", "--prompt", "p", "--cwd", "/tmp", "--kind", "daily", "--time", "09:00"], { stdout: process.stdout as any, stderr: process.stderr as any }));
+      await seedDisabled(env, dir, piStub);
       const code = await withEnv(env, () => cmdRun(["d"], { stdout: process.stdout as any, stderr: process.stderr as any }));
       assert.equal(code, 0);
+      assert.ok(!existsSync(join(dir, "runs.jsonl")));
+    } finally {
+      teardownEnv(env);
+    }
+  });
+});
+
+test("cmdRun --manual on a disabled job runs it and records a manual run without enabling it", async () => {
+  await withTempDir(async (dir) => {
+    const env = setupEnv({ dataDir: dir, plistDir: join(dir, "agents") });
+    const piStub = writeStub(env, "pi", mockPi());
+    try {
+      const catMod = await seedDisabled(env, dir, piStub);
+      const code = await withEnv(env, () => cmdRun(["d", "--manual"], { stdout: process.stdout as any, stderr: process.stderr as any }));
+      assert.equal(code, 0);
+      const runs = readFileSync(join(dir, "runs.jsonl"), "utf8").trim().split("\n").filter(Boolean);
+      assert.equal(runs.length, 1);
+      assert.equal(JSON.parse(runs[0]).triggerKind, "manual");
+      assert.equal(await withEnv(env, () => catMod.loadCatalog().jobs[0].enabled), false);
+    } finally {
+      teardownEnv(env);
+    }
+  });
+});
+
+test("cmdRun --manual on a consumed once job runs but keeps it disabled and consumed; scheduler still skips it", async () => {
+  await withTempDir(async (dir) => {
+    const env = setupEnv({ dataDir: dir, plistDir: join(dir, "agents") });
+    const piStub = writeStub(env, "pi", mockPi());
+    const launchctlStub = writeStub(env, "launchctl", "exit 0");
+    try {
+      const consumedAt = "2026-01-01T00:00:00.000Z";
+      const catMod = await seedDisabled(env, dir, piStub, {
+        schedule: { kind: "once", value: { at: "2099-01-01T00:05:00.000Z" } },
+        onceConsumedAt: consumedAt,
+      });
+      const io = { stdout: process.stdout as any, stderr: process.stderr as any };
+      const launchEnv = { ...env, PI_TICK_BACKEND: "launchd", PI_TICK_LAUNCHCTL: launchctlStub };
+      assert.equal(await withEnv(launchEnv, () => cmdRun(["d", "--manual"], io)), 0);
+      let job = await withEnv(launchEnv, () => catMod.loadCatalog().jobs[0]);
+      assert.equal(job.enabled, false);
+      assert.equal(job.onceConsumedAt, consumedAt);
+      assert.equal(await withEnv(launchEnv, () => cmdRun(["d"], io)), 0);
+      const runs = readFileSync(join(dir, "runs.jsonl"), "utf8").trim().split("\n").filter(Boolean);
+      assert.equal(runs.length, 1);
+      assert.equal(JSON.parse(runs[0]).triggerKind, "manual");
+      job = await withEnv(launchEnv, () => catMod.loadCatalog().jobs[0]);
+      assert.equal(job.enabled, false);
+      assert.equal(job.onceConsumedAt, consumedAt);
     } finally {
       teardownEnv(env);
     }

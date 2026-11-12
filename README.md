@@ -80,7 +80,7 @@ pi-tick delete nightly-recap
 | `pi-tick delete <id>` | Remove a job (also unloads its plist if enabled). |
 | `pi-tick enable <id>` | Register / re-register the launchd plist. Idempotent. |
 | `pi-tick disable <id>` | Unload the plist and rename it to `.plist.disabled`. |
-| `pi-tick run <id>` | Fire a job manually. |
+| `pi-tick run <id> [--manual]` | Fire a job. With `--manual` it runs even if the job is disabled; without it (scheduler path) disabled jobs are skipped with exit 0. |
 | `pi-tick log [id] [--limit N] [--failed] [--since <dur>]` | Tail the run log. `--failed` keeps only non-zero exits; `--since` keeps runs in the last `<dur>` (`30s`/`5m`/`2h`/`1d`). |
 | `pi-tick transcripts <id> [--limit N]` | List transcript files for a job, newest first. |
 | `pi-tick show <id> [--run N] [--tail M] [--raw] [--no-meta]` | Chat-style view of a transcript (default: latest). `--run N` picks the Nth most recent. `--tail M` keeps the last M assistant turns. `--raw` emits JSONL events, one per line (`event:` prefix for `jq` pipelines). `--no-meta` skips the run header. |
@@ -121,7 +121,7 @@ pi-tick config unset default-model   # back to step 3
 | Command | Purpose |
 |---|---|
 | `/tick list` | Show all jobs (markdown table). |
-| `/tick run <id>` | Fire a job manually. The `RunRecord` is marked `triggerKind: "manual"`. |
+| `/tick run <id>` | Fire a job manually, even if disabled. The `RunRecord` is marked `triggerKind: "manual"`. |
 | `/tick kill <id>` | Terminate a running job's process tree. |
 | `/tick enable <id>` | Register the job with the active backend (launchd/cron) so it starts firing. |
 | `/tick disable <id>` | Unregister the job from the backend without deleting it. |
@@ -232,8 +232,8 @@ pi-tick add reminder \
 The scheduler backend uses calendar fields and may technically match the same
 month/day/time in a later year. The first external invocation atomically marks
 the job consumed and disables it before starting Pi, so duplicate or stale
-invocations cannot run the prompt again. Manual runs do not consume the
-schedule. Failed external runs remain consumed by design.
+invocations cannot run the prompt again. Manual runs (allowed even after
+consumption) do not consume or re-enable the schedule. Failed external runs remain consumed by design.
 
 ## Backends
 
