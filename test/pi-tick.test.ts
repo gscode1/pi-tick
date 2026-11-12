@@ -846,6 +846,70 @@ test("cmdDisable on enabled job unloads and renames plist to .disabled", async (
   });
 });
 
+async function withLaunchdBackend<T>(fn: () => Promise<T>): Promise<T> {
+  const saved = process.env.PI_TICK_BACKEND;
+  process.env.PI_TICK_BACKEND = "launchd";
+  try { return await fn(); }
+  finally { if (saved === undefined) delete process.env.PI_TICK_BACKEND; else process.env.PI_TICK_BACKEND = saved; }
+}
+
+for (const disableFirst of [true, false]) {
+  test(`cmdDelete after enable${disableFirst ? " + disable" : ""} leaves no plist files for the id`, async () => {
+    await withTempDir(async (dir) => {
+      const plistDir = join(dir, "agents");
+      const env = setupEnv({ dataDir: dir, plistDir });
+      writeStub(env, "node", `echo fake`);
+      writeStub(env, "pi", `echo fake-pi`);
+      writeStub(env, "launchctl", stubbedLaunchctl(), { log: "launchctl.log" });
+      try {
+        const cliPath = new URL("../extensions/tick/bin/pi-tick.mjs", import.meta.url).pathname;
+        copyFileSync(cliPath, join(dir, "pi-tick.mjs"));
+        chmodSync(join(dir, "pi-tick.mjs"), 0o755);
+        const io = { stdout: process.stdout as any, stderr: process.stderr as any };
+        await withLaunchdBackend(async () => {
+          await withEnv(env, () => cmdAdd(["d1", "--prompt", "p", "--cwd", "/tmp", "--kind", "daily", "--time", "09:00", "--enabled"], io));
+          if (disableFirst) {
+            await withEnv(env, () => cmdDisable(["d1"], io));
+            assert.ok(existsSync(join(plistDir, "dev.pi.tick.d1.plist.disabled")));
+          }
+          const code = await withEnv(env, () => cmdDelete(["d1"], io));
+          assert.equal(code, 0);
+        });
+        assert.ok(!existsSync(join(plistDir, "dev.pi.tick.d1.plist")));
+        assert.ok(!existsSync(join(plistDir, "dev.pi.tick.d1.plist.disabled")));
+      } finally {
+        teardownEnv(env);
+      }
+    });
+  });
+}
+
+test("cmdDelete of an id missing from the catalog removes only that id's orphan plist files", async () => {
+  await withTempDir(async (dir) => {
+    const plistDir = join(dir, "agents");
+    const env = setupEnv({ dataDir: dir, plistDir });
+    writeStub(env, "launchctl", stubbedLaunchctl(), { log: "launchctl.log" });
+    try {
+      mkdirSync(plistDir, { recursive: true });
+      writeFileSync(join(plistDir, "dev.pi.tick.orph.plist.disabled"), "x");
+      writeFileSync(join(plistDir, "dev.pi.tick.other.plist.disabled"), "x");
+      writeFileSync(join(plistDir, "dev.pi.tick.other.plist"), "x");
+      let out = "";
+      const sink = { write: (c: string) => { out += c; return true; } } as any;
+      await withLaunchdBackend(async () => {
+        const code = await withEnv(env, () => cmdDelete(["orph"], { stdout: sink, stderr: sink }));
+        assert.equal(code, 0);
+      });
+      assert.ok(!existsSync(join(plistDir, "dev.pi.tick.orph.plist.disabled")));
+      assert.ok(existsSync(join(plistDir, "dev.pi.tick.other.plist.disabled")));
+      assert.ok(existsSync(join(plistDir, "dev.pi.tick.other.plist")));
+      assert.match(out, /orphan/);
+    } finally {
+      teardownEnv(env);
+    }
+  });
+});
+
 test("cmdDisable on disabled job is a no-op", async () => {
   await withTempDir(async (dir) => {
     const env = setupEnv({ dataDir: dir, plistDir: join(dir, "agents") });
