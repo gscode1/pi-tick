@@ -12,13 +12,23 @@ import {
 } from "./catalog.mjs";
 import { writeActiveRun, clearActiveRun, killRequested } from "./run-registry.mjs";
 import { runsFile } from "./paths.mjs";
+import { transcriptStartMs } from "./format.mjs";
 
 export const TRANSCRIPT_RETENTION_DAYS = 7;
 export const TRANSCRIPT_MAX_BYTES_PER_JOB = 500 * 1024 * 1024;
-export const LOG_RETENTION_DAYS = parseInt(process.env.PI_TICK_LOG_RETENTION_DAYS || "7", 10);
+// Non-numeric / negative values fall back to the default. 0 is valid (prune
+// every log except one touched recently; see LOG_CURRENT_GRACE_MS).
+export function parseRetentionDays(raw, dflt) {
+  if (raw === undefined || !/^\s*\d+(\.\d+)?\s*$/.test(raw)) return dflt;
+  return Number(raw);
+}
+export const LOG_RETENTION_DAYS = parseRetentionDays(process.env.PI_TICK_LOG_RETENTION_DAYS, 7);
+// A log modified this recently is never age-pruned: with a retention of 0 the
+// run that is finishing right now would otherwise delete its own log.
+export const LOG_CURRENT_GRACE_MS = 60 * 60 * 1000;
 export const LOG_MAX_BYTES_PER_FILE = parseInt(process.env.PI_TICK_LOG_MAX_BYTES || `${50 * 1024 * 1024}`, 10);
 
-export function pruneTranscripts(jobId, transcriptsDir, { now = Date.now(), stderr, maxBytes = TRANSCRIPT_MAX_BYTES_PER_JOB } = {}) {
+export function pruneTranscripts(jobId, transcriptsDir, { now = Date.now(), stderr, maxBytes = TRANSCRIPT_MAX_BYTES_PER_JOB, keep = [] } = {}) {
   const dir = join(transcriptsDir, jobId);
   if (!existsSync(dir)) return;
   const entries = readdirSync(dir)
@@ -49,17 +59,25 @@ export function pruneTranscripts(jobId, transcriptsDir, { now = Date.now(), stde
       const full = join(dir, f);
       try {
         const st = statSync(full);
-        return { path: full, mtime: st.mtime, size: st.size };
+        return { name: f, path: full, mtime: st.mtime, size: st.size };
       } catch {
         return null;
       }
     })
     .filter(Boolean)
-    .sort((a, b) => a.mtime.getTime() - b.mtime.getTime());
+    // Oldest first by the start time in the filename (mtime as fallback).
+    .sort((a, b) => (transcriptStartMs(a.name, a.mtime.getTime()) - transcriptStartMs(b.name, b.mtime.getTime()))
+      || (a.mtime.getTime() - b.mtime.getTime()));
+
+  // Never delete the newest transcript (the run that was just recorded; it
+  // may alone exceed the cap) or any path in `keep` (e.g. job.lastRun's).
+  const protectedPaths = new Set(keep);
+  if (remaining.length > 0) protectedPaths.add(remaining[remaining.length - 1].path);
 
   let total = remaining.reduce((s, e) => s + e.size, 0);
   for (const e of remaining) {
     if (total <= maxBytes) break;
+    if (protectedPaths.has(e.path)) continue;
     try {
       unlinkSync(e.path);
       total -= e.size;
@@ -69,14 +87,14 @@ export function pruneTranscripts(jobId, transcriptsDir, { now = Date.now(), stde
   }
 }
 
-export function pruneLogs(jobId, logsDir, { now = Date.now(), stderr } = {}) {
-  const ageCutoff = now - LOG_RETENTION_DAYS * 86400_000;
+export function pruneLogs(jobId, logsDir, { now = Date.now(), stderr, retentionDays = LOG_RETENTION_DAYS } = {}) {
+  const ageCutoff = now - retentionDays * 86400_000;
   const maxBytes = Number.isSafeInteger(LOG_MAX_BYTES_PER_FILE) ? LOG_MAX_BYTES_PER_FILE : 50 * 1024 * 1024;
   for (const suffix of [".out.log", ".err.log", ".out.log.1", ".err.log.1"]) {
     const p = join(logsDir, `${jobId}${suffix}`);
     try {
       const st = statSync(p);
-      if (st.mtime.getTime() < ageCutoff) {
+      if (st.mtime.getTime() < ageCutoff && st.mtime.getTime() < now - LOG_CURRENT_GRACE_MS) {
         unlinkSync(p);
       } else if (st.size > maxBytes && !suffix.endsWith(".1")) {
         renameSync(p, `${p}.1`);

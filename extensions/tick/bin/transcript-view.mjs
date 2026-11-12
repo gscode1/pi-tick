@@ -19,9 +19,8 @@
 
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { runsFile } from "./paths.mjs";
 import { transcriptJobDir } from "./catalog.mjs";
-import { formatLocal, durationSeconds, tailLines } from "./format.mjs";
+import { formatLocal, durationSeconds, tailRunLines, transcriptStartMs } from "./format.mjs";
 
 // Default truncation knobs for the chat-style pretty-printer. These are
 // exposed as constants so tests can reference the same values.
@@ -246,9 +245,9 @@ export function parseTranscriptFilename(name) {
 
 // Look up a run record by runId in runs.jsonl. Tails the file for speed.
 export function findRunRecord(runId) {
-  if (!existsSync(runsFile())) return null;
-  // Tails the last 5000 lines; run records are small so this is plenty.
-  const lines = tailLines(runsFile(), 5000);
+  // Tails the last 5000 lines (spilling into the rotated runs.jsonl.1 when
+  // the current file is short); run records are small so this is plenty.
+  const lines = tailRunLines(5000);
   for (let i = lines.length - 1; i >= 0; i--) {
     try {
       const rec = JSON.parse(lines[i]);
@@ -266,7 +265,7 @@ export function findRunRecord(runId) {
 export function formatRunHeader(file, runRecord, jobId) {
   const parts = [];
   if (jobId) parts.push(jobId);
-  const at = new Date(file.mtime);
+  const at = file.startedAt ? new Date(file.startedAt) : new Date(file.mtime);
   parts.push(formatLocal(at.toISOString()));
   if (runRecord && runRecord.runId) {
     parts.push(`run ${runRecord.runId.slice(0, 8)}`);
@@ -297,7 +296,7 @@ export function listTranscriptFiles(jobId) {
       const full = join(dir, f);
       try {
         const st = statSync(full);
-        return { name: f, path: full, mtime: st.mtime, size: st.size };
+        return { name: f, path: full, mtime: st.mtime, size: st.size, startedAt: new Date(transcriptStartMs(f, st.mtime.getTime())) };
       } catch {
         return null;
       }

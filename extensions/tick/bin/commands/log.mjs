@@ -5,7 +5,7 @@ import { runsFile } from "../paths.mjs";
 import { ensureFileMode } from "../catalog.mjs";
 import { parseFlags } from "../argv.mjs";
 import { fail } from "../errors.mjs";
-import { tailLines, formatLocal, durationSeconds } from "../format.mjs";
+import { tailRunLines, formatLocal, durationSeconds } from "../format.mjs";
 import { printTable } from "../display.mjs";
 
 // Parse a duration string like "30m", "2h", "1d", "90s" into milliseconds.
@@ -42,7 +42,7 @@ export function cmdLog(argv, { stdout = process.stdout, stderr = process.stderr 
   // Tail by reading backwards in 64KB chunks and counting newlines.
   // Over-fetch so post-filters still have enough to fill --limit.
   const overFetch = Math.max(limit * 5 + 1000, (sinceMs != null ? 5000 : 0));
-  const all = tailLines(runsFile(), overFetch);
+  const all = tailRunLines(overFetch);
   const records = [];
   for (const line of all) {
     if (!line.trim()) continue;
