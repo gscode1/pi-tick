@@ -168,6 +168,14 @@ function buildRunArgs(job, { defaultModel }) {
 // escalation so the rest of runJob only ever calls killChild(reason) /
 // resetIdleTimer() / getKillReason() — the timer trio (issue: these three
 // timers used to live inline, interleaved with the RPC and streaming code).
+// Node clamps setTimeout delays above 2^31-1 ms to 1 ms (TimeoutOverflowWarning),
+// which would fire a timer almost immediately. Validation rejects such values
+// on the way in, but a legacy catalog entry may still hold one, so every delay
+// is clamped here: an absurdly long limit behaves as "~24.8 days" rather than
+// "1 ms". (Clamp rather than disable: the user asked for a limit.)
+const MAX_TIMER_MS = 2147483647;
+const clampDelay = (ms) => Math.min(ms, MAX_TIMER_MS);
+
 function createRunControls(child, { timeoutMs, idleTimeoutMs, killGraceMs }) {
   let killed = false;
   let killReason = null;
@@ -195,7 +203,7 @@ function createRunControls(child, { timeoutMs, idleTimeoutMs, killGraceMs }) {
     // Arm the escalation timer BEFORE signalling: a child that closes
     // synchronously inside the signal call runs clearAll(), which must see
     // (and clear) this timer or it fires later and re-signals a dead child.
-    escalationTimer = setTimeout(() => signalChildTree("SIGKILL"), killGraceMs);
+    escalationTimer = setTimeout(() => signalChildTree("SIGKILL"), clampDelay(killGraceMs));
     signalChildTree("SIGTERM");
   };
 
@@ -206,12 +214,12 @@ function createRunControls(child, { timeoutMs, idleTimeoutMs, killGraceMs }) {
   const resetIdleTimer = () => {
     if (idleTimeoutMs <= 0) return;
     clearIdleTimer();
-    idleTimer = setTimeout(() => killChild("idle_timeout"), idleTimeoutMs);
+    idleTimer = setTimeout(() => killChild("idle_timeout"), clampDelay(idleTimeoutMs));
   };
 
   const armWallTimer = () => {
     if (timeoutMs <= 0) return;
-    wallTimer = setTimeout(() => killChild("timeout"), timeoutMs);
+    wallTimer = setTimeout(() => killChild("timeout"), clampDelay(timeoutMs));
   };
 
   const clearAll = () => {
@@ -263,7 +271,9 @@ function createRpcLifecycle({ isSlashCommand, child }) {
   let finalError = null;
 
   const closeStdin = () => {
-    if (isSlashCommand && child.stdin && !child.stdin.destroyed) child.stdin.end();
+    if (isSlashCommand && child.stdin && !child.stdin.destroyed) {
+      try { child.stdin.end(); } catch { /* pipe already gone */ }
+    }
   };
 
   const handleEvent = (evt) => {
@@ -301,8 +311,10 @@ function createRpcLifecycle({ isSlashCommand, child }) {
 
   return {
     writePrompt: (prompt) => {
-      if (isSlashCommand && child.stdin) {
-        child.stdin.write(`${JSON.stringify({ type: "prompt", message: prompt })}\n`);
+      if (isSlashCommand && child.stdin && !child.stdin.destroyed) {
+        try {
+          child.stdin.write(`${JSON.stringify({ type: "prompt", message: prompt })}\n`);
+        } catch { /* pipe already gone; the 'error' listener handles async EPIPE */ }
       }
     },
     handleLine: (line) => {
@@ -507,6 +519,17 @@ export async function runJob(job, trigger, options) {
     writeActiveRun(job.id, { jobId: job.id, runId, startedAt, pid: process.pid, childPid: child.pid });
   } catch { /* best effort */ }
 
+  let stderrBuf = "";
+  // pi may close stdin or exit before reading the prompt; without a listener
+  // the resulting EPIPE is an uncaught exception (crashing the runner or, on
+  // the in-process path, the user's pi session). Benign pipe errors are
+  // ignored; anything else is kept in stderrBuf.
+  if (child.stdin) {
+    child.stdin.on("error", (err) => {
+      if (err && (err.code === "EPIPE" || err.code === "ECONNRESET")) return;
+      stderrBuf = (stderrBuf + `stdin error: ${err && err.message}\n`).slice(-16384);
+    });
+  }
   const rpc = createRpcLifecycle({ isSlashCommand, child });
   // Keep RPC stdin open until the assistant turn finishes (see
   // createRpcLifecycle above for why).
@@ -515,7 +538,6 @@ export async function runJob(job, trigger, options) {
   // Issue #48 — trigger is always passed explicitly by callers now (cmdRun
   // reads --manual, not process.env). "external" only covers direct
   // runJob() callers (tests) that don't pass a trigger at all.
-  let stderrBuf = "";
   let spawnErr = null;
   let lineBuf = "";
 
@@ -562,11 +584,18 @@ export async function runJob(job, trigger, options) {
 
   return new Promise((resolve) => {
     child.on("error", (err) => {
-      spawnErr = err;
+      // Only a child that never spawned (no pid) is a spawn failure; later
+      // errors (e.g. a failed kill()) must not mask the real exit status.
+      if (!child.pid) spawnErr = err;
     });
     child.on("close", async (code, signal) => {
       controls.clearAll();
       rpc.clear();
+
+      // Flush the decoder and parse a final line lacking a trailing newline.
+      lineBuf += stdoutDecoder.end();
+      if (lineBuf.trim()) rpc.handleLine(lineBuf);
+      lineBuf = "";
 
       if (transcriptStream) {
         await new Promise(r => transcriptStream.end(r));
