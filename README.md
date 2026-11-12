@@ -91,7 +91,8 @@ Flags for `add`:
 - `--prompt "..."` — required (≤ 16 KB)
 - `--cwd <abs path>` — required, must exist
 - `--kind interval|daily|weekly|once` — required
-- `--minutes N --seconds N` — for `interval` (min total 5s)
+- `--minutes N --seconds N` — for `interval` (min total 5s; see "Interval support" below)
+- `--offset-minutes N --offset-seconds N` — optional phase for `interval` (see "Interval support")
 - `--at ISO-8601` — for `once`; absolute future timestamp with `:00` seconds and no fractional milliseconds
 - `--time HH:MM` — for `daily` and `weekly` (24h)
 - `--days mon,wed,fri` — for `weekly` (comma-separated, case-insensitive)
@@ -194,6 +195,26 @@ automatically.
   remote or non-GUI session, this won't work — but our use case assumes
   a normal desktop session.
 
+### Interval support
+
+Neither launchd's `StartInterval` nor cron can express "every N minutes
+from a given phase" in general, so pi-tick renders only what it can do
+exactly and rejects the rest with a clear error at `add` / `enable` time.
+
+| Backend | No offset | With offset (`--offset-minutes`) |
+|---|---|---|
+| launchd | any interval ≥ 5s (`StartInterval`) | calendar form only (below); offset must be whole minutes and smaller than the interval |
+| cron | 1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30 minutes (`*/N`) or 1, 2, 3, 4, 6, 8, 12, 24 hours (`0 */H`) | calendar form only (below) |
+
+Calendar form: an interval of N minutes where 60 is divisible by N (minute
+list every hour), or of H whole hours where 24 is divisible by H (hour list
+at a fixed minute). Examples: `every 2h +1h` fires at 01:00, 03:00, ...;
+`every 1h +30m` fires at :30; `every 3h +30m` fires at 00:30, 03:30, ....
+With an offset launchd gets `StartCalendarInterval` only (never together
+with `StartInterval`). Without an offset launchd jobs count from load/last
+run, so the "next fire" shown is an approximation; calendar-form jobs show
+the real next wall-clock time.
+
 ### Linux (cron)
 
 - **User crontab, not system.** `pi-tick` adds entries to the **user's**
@@ -203,8 +224,8 @@ automatically.
 - **Minute granularity.** Cron's smallest unit is one minute. The
   minimum interval on Linux is **60 seconds** (vs. 5 seconds on
   macOS). Sub-minute cadences (e.g. `--seconds 30`) are rejected with
-  a clear error at `pi-tick add` time. Non-multiple-of-60 intervals
-  (e.g. 90 seconds) are also rejected — cron can't express them.
+  a clear error at `pi-tick add` time, as are intervals that cron
+  cannot render faithfully (see "Interval support" below).
 - **Standard cron service must be running.** Most Linux distributions
   run `cron`/`crond` by default. If `crontab -l` returns "no crontab
   for \<user\>" the daemon is up but you have no entries yet; that's

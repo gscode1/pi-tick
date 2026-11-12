@@ -421,8 +421,8 @@ export default function (pi: ExtensionAPI): void {
       scheduleValue: Type.Object({
         minutes: Type.Optional(Type.Number({ description: "interval: minutes (≥0)" })),
         seconds: Type.Optional(Type.Number({ description: "interval: seconds (≥0); interval must total ≥ 5s" })),
-        offsetMinutes: Type.Optional(Type.Number({ description: "interval: optional phase offset in minutes (≥0); not honored by the cron backend" })),
-        offsetSeconds: Type.Optional(Type.Number({ description: "interval: optional phase offset in seconds (≥0); not honored by the cron backend" })),
+        offsetMinutes: Type.Optional(Type.Number({ description: "interval: optional phase offset in whole minutes (≥0, smaller than the interval); only for intervals of 1,2,3,4,5,6,10,12,15,20,30 minutes or 1,2,3,4,6,8,12,24 hours" })),
+        offsetSeconds: Type.Optional(Type.Number({ description: "interval: optional phase offset in seconds (must be a multiple of 60; prefer offsetMinutes)" })),
         time: Type.Optional(Type.String({ description: "daily/weekly: HH:MM in 24h format" })),
         days: Type.Optional(Type.Array(Type.String(), { description: "weekly: list of weekday names (monday, tuesday, ...)" })),
         at: Type.Optional(Type.String({ description: "once: absolute ISO-8601 timestamp, minute precision, and in the future" })),

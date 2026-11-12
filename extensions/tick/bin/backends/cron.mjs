@@ -28,7 +28,7 @@ import {
 import { join } from "node:path";
 
 import { logsDir as defaultLogsDir } from "../paths.mjs";
-import { resolveScheduleFields } from "../schedule.mjs";
+import { resolveScheduleFields, intervalCalendarForm, CALENDAR_INTERVAL_HINT } from "../schedule.mjs";
 
 // Cron weekday numbering is identical to launchd: Sun=0..Sat=6. Schedule
 // interpretation (hour/minute/weekdays/offset) is shared with the launchd
@@ -41,6 +41,21 @@ function labelFor(jobId) {
   return `pi-tick:${jobId}`;
 }
 
+// Returns an error string when cron cannot render this interval faithfully.
+function intervalError(fields) {
+  if (fields.totalSeconds < MIN_INTERVAL_SECONDS) {
+    return `interval ${fields.totalSeconds}s is below the cron minimum of ${MIN_INTERVAL_SECONDS}s`;
+  }
+  if (fields.totalSeconds % 60 !== 0) {
+    return `interval ${fields.totalSeconds}s is not a whole number of minutes; cron cannot express sub-minute cadences`;
+  }
+  const form = intervalCalendarForm(fields.totalSeconds, fields.offsetSeconds);
+  if (form.error) {
+    return `cron cannot render this interval faithfully: ${form.error} (cron supports ${CALENDAR_INTERVAL_HINT.replace("supported with an offset: ", "")}; offsets must be whole minutes smaller than the interval)`;
+  }
+  return null;
+}
+
 // Build a single cron line for a job. Returns { line, warning? }.
 export function buildCronLine(job, opts) {
   const s = job.schedule;
@@ -51,24 +66,17 @@ export function buildCronLine(job, opts) {
   let schedule;
   if (s.kind === "interval") {
     const fields = resolveScheduleFields(s);
-    // The cron backend cannot express a phase offset (cron has no
-    // first-fire / phase primitive), so reject explicitly when one is
-    // set. 0 is always valid — it's the no-offset case and any
-    // pre-issue-23 catalog entry (no `offset` key) reads as 0 here.
-    if (fields.offsetSeconds > 0) {
-      return { error: `interval offset not supported on the cron backend; use --kind daily at HH:MM or omit --offset-*` };
-    }
-    if (fields.totalSeconds < MIN_INTERVAL_SECONDS) {
-      return { error: `interval ${fields.totalSeconds}s is below the cron minimum of ${MIN_INTERVAL_SECONDS}s` };
-    }
-    if (fields.totalSeconds % 60 !== 0) {
-      return { error: `interval ${fields.totalSeconds}s is not a whole number of minutes; cron cannot express sub-minute cadences` };
-    }
-    const minutes = Math.floor(fields.totalSeconds / 60);
-    if (minutes === 1) {
-      schedule = "* * * * *";           // every minute
+    const err = intervalError(fields);
+    if (err) return { error: err };
+    const minutes = fields.totalSeconds / 60;
+    if (fields.offsetSeconds === 0) {
+      if (minutes === 1) schedule = "* * * * *";
+      else if (minutes < 60) schedule = `*/${minutes} * * * *`;
+      else if (minutes === 60) schedule = "0 * * * *";
+      else schedule = `0 */${minutes / 60} * * *`;
     } else {
-      schedule = `*/${minutes} * * * *`; // every N minutes
+      const form = intervalCalendarForm(fields.totalSeconds, fields.offsetSeconds);
+      schedule = `${form.minutes.join(",")} ${form.hours ? form.hours.join(",") : "*"} * * *`;
     }
   } else if (s.kind === "daily") {
     if (typeof s.value.time !== "string" || !/^\d{2}:\d{2}$/.test(s.value.time)) {
@@ -136,6 +144,13 @@ function writeCrontab(content) {
   });
 }
 
+// True when `line` is the pi-tick run command for `jobId` (`... run 'id' ...`;
+// the quotes are optional so hand-edited lines still match).
+function isOurCommand(line, jobId) {
+  const id = jobId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`\\brun\\s+'?${id}'?(\\s|$)`).test(line);
+}
+
 // ponytail: `ours` is preserved for API parity; current callers ignore it.
 // Walk lines instead of splitting on blank lines so a crontab without
 // blank separators between entries still gets parsed correctly.
@@ -150,8 +165,10 @@ function extractEntries(crontabText, jobId) {
   for (let i = 0; i < lines.length; i++) {
     if (lines[i] === `${COMMENT_PREFIX}${jobId}`) {
       ours.push(lines[i]);
-      i++; // consume the marker
-      if (i < lines.length && lines[i].length > 0) {
+      // Consume the following line only if it is our command for this id; if
+      // the user edited or removed it, drop just the marker and keep their line.
+      if (i + 1 < lines.length && isOurCommand(lines[i + 1], jobId)) {
+        i++;
         ours.push(lines[i]);
       }
       continue;
@@ -171,6 +188,10 @@ export const cronBackend = {
   name: "cron",
   minimumIntervalSeconds: MIN_INTERVAL_SECONDS,
   label: labelFor,
+  scheduleError: (schedule) => {
+    if (schedule.kind !== "interval") return null;
+    return intervalError(resolveScheduleFields(schedule));
+  },
   listRegistered: async () => {
     const text = readCrontab();
     if (text === null) return [];

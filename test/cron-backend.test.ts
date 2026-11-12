@@ -92,24 +92,6 @@ test("buildCronLine: interval with explicit 0/0 offset matches the no-offset lin
   assert.equal(noOffset.line, zeroOffset.line);
 });
 
-test("buildCronLine: interval with offset minutes rejects on cron", () => {
-  const out = buildCronLine(
-    { id: "j1", schedule: { kind: "interval", value: { minutes: 2, seconds: 0, offset: { minutes: 15, seconds: 0 } } } },
-    { nodePath: FAKE_NODE, cliPath: FAKE_CLI, logsDir: () => FAKE_LOGS },
-  );
-  assert.ok(out.error, "expected error for cron + interval offset");
-  assert.match(out.error, /interval offset not supported on the cron backend/);
-});
-
-test("buildCronLine: interval with offset seconds rejects on cron", () => {
-  const out = buildCronLine(
-    { id: "j1", schedule: { kind: "interval", value: { minutes: 2, seconds: 0, offset: { minutes: 0, seconds: 30 } } } },
-    { nodePath: FAKE_NODE, cliPath: FAKE_CLI, logsDir: () => FAKE_LOGS },
-  );
-  assert.ok(out.error, "expected error for cron + interval offset seconds");
-  assert.match(out.error, /interval offset not supported on the cron backend/);
-});
-
 test("buildCronLine: interval 60s produces '* * * * *'", () => {
   const out = buildCronLine(
     { id: "j1", schedule: { kind: "interval", value: { minutes: 1, seconds: 0 } } },
@@ -828,4 +810,35 @@ test("getBackend() returns launchd on darwin by default", async () => {
       teardownEnv(env);
     }
   });
+});
+
+test("cronBackend.unregister keeps a user line when pi-tick's command line was edited or removed", async () => {
+  const cases: Array<[string, string[], string]> = [
+    // Command line edited by the user: the marker is dropped, their line survives.
+    ["edited", ["# pi-tick: alpha", "0 6 * * * /usr/local/bin/my-own-job.sh", "# keep", "1 2 * * * /bin/true"],
+      "0 6 * * * /usr/local/bin/my-own-job.sh\n# keep\n1 2 * * * /bin/true\n"],
+    // Command line deleted: the marker is followed directly by another marker/entry.
+    ["missing", ["# pi-tick: alpha", "# pi-tick: beta", "* * * * * '/n' '/c' run 'beta' >> '/l' 2>> '/e'", "5 5 * * * /bin/other"],
+      "# pi-tick: beta\n* * * * * '/n' '/c' run 'beta' >> '/l' 2>> '/e'\n5 5 * * * /bin/other\n"],
+    // Intact pair: both lines are removed, unrelated lines kept.
+    ["intact", ["# pi-tick: alpha", "* * * * * '/n' '/c' run 'alpha' >> '/l' 2>> '/e'", "7 7 * * * /bin/mine"],
+      "7 7 * * * /bin/mine\n"],
+  ];
+  for (const [name, lines, expected] of cases) {
+    await withTempDir(async (dir) => {
+      const crontabFile = join(dir, "crontab.txt");
+      writeFileSync(crontabFile, lines.join("\n") + "\n", "utf8");
+      const env = setupEnv({ dataDir: join(dir, "data"), plistDir: join(dir, "agents") });
+      makeCrontabStub(env, crontabFile);
+      try {
+        await withEnv({ ...env, ...BACKEND_ENV }, async () => {
+          const r = await cronBackend.unregister("alpha");
+          assert.ok(r.ok, r.error);
+          assert.equal(readFileSync(crontabFile, "utf8"), expected, name);
+        });
+      } finally {
+        teardownEnv(env);
+      }
+    });
+  }
 });

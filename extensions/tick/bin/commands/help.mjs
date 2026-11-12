@@ -29,6 +29,10 @@ Usage:
   pi-tick config <set|get|unset> <key> [value]
   pi-tick help
 
+Interval offsets (--offset-minutes) need whole minutes smaller than the
+interval, on a divisor of 60 minutes or an hour count dividing 24 (e.g. 2h +1h).
+cron also needs one of those for plain intervals; launchd accepts any >= 5s.
+
 Jobs are disabled by default; pass --enabled to schedule them.
 
   pi-tick kill <id>  # terminate a running job and everything it spawned;
