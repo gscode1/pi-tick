@@ -10,8 +10,9 @@
 // memory.
 
 import { ensureDataDirs, loadCatalog, saveCatalog, findJob, withCatalogLock } from "../catalog.mjs";
-import { parseFlags, flagString, flagOptionalU32 } from "../argv.mjs";
+import { parseFlags, flagString, flagOptionalString, flagOptionalU32 } from "../argv.mjs";
 import { fail } from "../errors.mjs";
+import { PiTickError } from "../catalog.mjs";
 import { validateId, validatePrompt, validateCwd } from "../validate.mjs";
 import { buildSchedule, KIND_INTERVAL, KIND_DAILY, KIND_WEEKLY, KIND_ONCE } from "../schedule.mjs";
 import { cmdEnableInternal } from "./enable.mjs";
@@ -123,7 +124,33 @@ export async function createTick(params, { stdout = process.stdout, stderr = pro
   // Lock is released by now. cmdEnableInternal re-acquires it on its own
   // when it runs; we must NOT call it inside the wrap above or it would
   // self-deadlock (EEXIST on the second acquire).
-  await cmdEnableInternal(id, { skipCatalogExistsCheck: true, stdout, stderr });
+  try {
+    await cmdEnableInternal(id, { skipCatalogExistsCheck: true, stdout, stderr });
+  } catch (err) {
+    // Enabling failed: roll the catalog entry back so a retry does not hit
+    // "already exists". Done under the catalog lock, and only removes the
+    // entry we just wrote (matched by createdAt) and that is still disabled,
+    // so a pre-existing or concurrently re-created job is never touched.
+    let rollbackError = null;
+    try {
+      await withCatalogLock(async () => {
+        const catalog = loadCatalog();
+        const cur = findJob(catalog, id);
+        if (cur && cur.createdAt === job.createdAt && cur.enabled !== true) {
+          catalog.jobs = catalog.jobs.filter((j) => j !== cur && j.id !== id);
+          saveCatalog(catalog);
+        }
+      });
+    } catch (e) {
+      rollbackError = e;
+    }
+    const reason = err && err.message ? err.message : String(err);
+    const code = err instanceof PiTickError ? err.code : 1;
+    if (rollbackError) {
+      fail(`job '${id}' was created but could not be enabled: ${reason} (rollback failed: ${rollbackError.message}; run 'pi-tick delete ${id}')`, code);
+    }
+    fail(`job '${id}' was not created: enabling failed: ${reason}`, code);
+  }
   return findJob(loadCatalog(), id) || job;
 }
 
@@ -136,7 +163,12 @@ export async function cmdAdd(argv, { stdout = process.stdout, stderr = process.s
   const cwd = flagString(flags, "cwd");
   const kind = flagString(flags, "kind");
   const enabled = flags.enabled === true || flags.enabled === "true";
-  const model = flags.model ? String(flags.model) : undefined;
+  const model = flagOptionalString(flags, "model");
+  // A bare value flag becomes `true`, which downstream validators would
+  // coerce (Number(true) === 1) or stringify; reject it up front.
+  for (const name of ["minutes", "seconds", "offset-minutes", "offset-seconds", "time", "days", "at"]) {
+    if (flags[name] === true) fail(`--${name} requires a value`, 2);
+  }
 
   await createTick({
     jobId: id,

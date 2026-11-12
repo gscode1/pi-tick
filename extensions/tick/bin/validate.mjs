@@ -1,7 +1,7 @@
 // validate.mjs — job-field validation, shared by every subcommand that
 // touches a job id, prompt, or cwd.
 
-import { existsSync } from "node:fs";
+import { statSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { fail } from "./errors.mjs";
 
@@ -15,7 +15,7 @@ export function validateId(id) {
 }
 
 export function validatePrompt(prompt) {
-  if (typeof prompt !== "string" || prompt.length === 0) {
+  if (typeof prompt !== "string" || prompt.trim().length === 0) {
     fail(`prompt must be a non-empty string`, 2);
   }
   const bytes = Buffer.byteLength(prompt, "utf8");
@@ -28,7 +28,13 @@ export function validateCwd(cwd) {
   if (typeof cwd !== "string" || !isAbsolute(cwd)) {
     fail(`cwd must be an absolute path (got '${cwd}')`, 2);
   }
-  if (!existsSync(cwd)) {
+  let st;
+  try {
+    st = statSync(cwd);
+  } catch {
     fail(`cwd does not exist: ${cwd}`, 2);
+  }
+  if (!st.isDirectory()) {
+    fail(`cwd is not a directory: ${cwd}`, 2);
   }
 }

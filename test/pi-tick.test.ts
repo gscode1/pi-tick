@@ -3,7 +3,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseFlags } from "../extensions/tick/bin/argv.mjs";
+import { parseFlags, flagOptionalString, BOOLEAN_FLAGS } from "../extensions/tick/bin/argv.mjs";
 import { validateId, validatePrompt, validateCwd } from "../extensions/tick/bin/validate.mjs";
 import { formatSchedule, formatNextFire } from "../extensions/tick/bin/display.mjs";
 import { augmentedPath } from "../extensions/tick/bin/bin-resolve.mjs";
@@ -23,7 +23,7 @@ import { launchdBackend, renderPlist } from "../extensions/tick/bin/backends/lau
 import { cronBackend } from "../extensions/tick/bin/backends/cron.mjs";
 import { withTempDir, setupEnv, withEnv, teardownEnv, writeStub, readStubLog } from "./_helpers.ts";
 import { join, sep, dirname } from "node:path";
-import { existsSync, readFileSync, writeFileSync, statSync, mkdirSync, copyFileSync, chmodSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, statSync, mkdirSync, copyFileSync, chmodSync, rmSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 
@@ -669,11 +669,10 @@ test("cmdAdd --enabled enables and loads plist via stubbed launchctl", async () 
       const log = readStubLog(env, "launchctl.log");
       // bootstrap was not called (enable failed at resolvePiPath)
       assert.equal(log.includes("bootstrap"), false);
-      // But the catalog entry should exist with enabled=false (enable failure reverts).
+      // Enable failure rolls the catalog entry back (issue #28), so a retry works.
       const cat = JSON.parse(readFileSync(join(dir, "jobs.json"), "utf8"));
       const j = cat.jobs.find((j: { id: string }) => j.id === "with-enabled");
-      assert.ok(j);
-      assert.equal(j.enabled, false);
+      assert.equal(j, undefined);
     } finally {
       teardownEnv(env);
     }
@@ -2347,4 +2346,194 @@ test("cmdAdd accepts the 2^31-1 boundary", async () => {
       teardownEnv(env);
     }
   });
+});
+
+// ─── Issue #28: CLI input handling ───────────────────────────────────────
+
+const IO = { stdout: process.stdout as any, stderr: process.stderr as any };
+const captureIO = () => {
+  const o = { out: "", err: "" };
+  return { o, io: { stdout: { write: (c: string) => { o.out += c; return true; } } as any, stderr: { write: (c: string) => { o.err += c; return true; } } as any } };
+};
+const baseAdd = ["--prompt", "p", "--cwd", "/tmp", "--kind", "daily", "--time", "09:00"];
+const readCat = (dir: string) => JSON.parse(readFileSync(join(dir, "jobs.json"), "utf8"));
+
+test("parseFlags: known boolean flags never consume the next token", () => {
+  for (const f of ["enabled", "manual", "failed", "json", "raw", "no-meta"]) {
+    assert.ok(BOOLEAN_FLAGS.has(f), f);
+  }
+  let r = parseFlags(["--enabled", "a7", "--kind", "daily"]);
+  assert.equal(r.enabled, true);
+  assert.deepEqual(r._, ["a7"]);
+  r = parseFlags(["--failed", "job1"]);
+  assert.equal(r.failed, true);
+  assert.deepEqual(r._, ["job1"]);
+  r = parseFlags(["--manual", "job1"]);
+  assert.equal(r.manual, true);
+  assert.deepEqual(r._, ["job1"]);
+  r = parseFlags(["--json", "--raw", "--no-meta", "x"]);
+  assert.deepEqual([r.json, r.raw, r["no-meta"]], [true, true, true]);
+  assert.deepEqual(r._, ["x"]);
+});
+
+test("parseFlags: --flag=value may start with -- and boolean --flag=true stays a string", () => {
+  assert.equal(parseFlags(["--prompt=--help"]).prompt, "--help");
+  assert.equal(parseFlags(["--prompt=a=b"]).prompt, "a=b");
+  assert.equal(parseFlags(["--enabled=true"]).enabled, "true");
+});
+
+test("parseFlags: -- ends options", () => {
+  const r = parseFlags(["a", "--", "--enabled", "--x=1", "-y"]);
+  assert.deepEqual(r._, ["a", "--enabled", "--x=1", "-y"]);
+  assert.equal(r.enabled, undefined);
+});
+
+test("parseFlags: value flag followed by another flag stays bare; single-dash value is consumed", () => {
+  const r = parseFlags(["--model", "--enabled"]);
+  assert.equal(r.model, true);
+  assert.equal(r.enabled, true);
+  assert.equal(parseFlags(["--prompt", "-x"]).prompt, "-x");
+});
+
+test("flagOptionalString: absent, bare and empty", () => {
+  assert.equal(flagOptionalString({}, "model"), undefined);
+  assert.equal(flagOptionalString({ model: "m" }, "model"), "m");
+  assert.throws(() => flagOptionalString({ model: true }, "model"), /--model requires a value/);
+  assert.throws(() => flagOptionalString({ model: "  " }, "model"), /non-empty/);
+});
+
+test("cmdAdd: bare --model is rejected and nothing is stored", async () => {
+  await withTempDir(async (dir) => {
+    const env = setupEnv({ dataDir: dir, plistDir: join(dir, "agents") });
+    try {
+      for (const argv of [["m1", ...baseAdd, "--model"], ["m1", "--model", ...baseAdd], ["m1", ...baseAdd, "--model="]]) {
+        await withEnv(env, () => cmdAdd(argv, IO)).then(
+          () => assert.fail("expected throw"),
+          (err) => { assert.ok(err instanceof PiTickError); assert.match(err.message, /--model/); },
+        );
+      }
+      assert.equal(existsSync(join(dir, "jobs.json")), false);
+    } finally { teardownEnv(env); }
+  });
+});
+
+test("cmdAdd: --model <id> is stored", async () => {
+  await withTempDir(async (dir) => {
+    const env = setupEnv({ dataDir: dir, plistDir: join(dir, "agents") });
+    try {
+      await withEnv(env, () => cmdAdd(["m2", ...baseAdd, "--model", "openai/gpt-x"], captureIO().io));
+      assert.equal(readCat(dir).jobs[0].model, "openai/gpt-x");
+    } finally { teardownEnv(env); }
+  });
+});
+
+test("cmdAdd: bare schedule value flags are rejected (--minutes must not mean 1)", async () => {
+  await withTempDir(async (dir) => {
+    const env = setupEnv({ dataDir: dir, plistDir: join(dir, "agents") });
+    try {
+      await withEnv(env, () => cmdAdd(["b1", "--prompt", "p", "--cwd", "/tmp", "--kind", "interval", "--minutes"], IO)).then(
+        () => assert.fail("expected throw"),
+        (err) => assert.match(err.message, /--minutes requires a value/),
+      );
+      assert.equal(existsSync(join(dir, "jobs.json")), false);
+    } finally { teardownEnv(env); }
+  });
+});
+
+test("cmdAdd: --prompt=--help works, and -- allows the id after options", async () => {
+  await withTempDir(async (dir) => {
+    const env = setupEnv({ dataDir: dir, plistDir: join(dir, "agents") });
+    try {
+      await withEnv(env, () => cmdAdd(["h1", "--prompt=--help", "--cwd", "/tmp", "--kind", "daily", "--time", "09:00"], captureIO().io));
+      await withEnv(env, () => cmdAdd([...baseAdd, "--", "h2"], captureIO().io));
+      const jobs = readCat(dir).jobs;
+      assert.equal(jobs.find((j: any) => j.id === "h1").prompt, "--help");
+      assert.ok(jobs.find((j: any) => j.id === "h2"));
+    } finally { teardownEnv(env); }
+  });
+});
+
+test("cmdAdd: --enabled before the id keeps the id positional", async () => {
+  await withTempDir(async (dir) => {
+    const env = setupEnv({ dataDir: dir, plistDir: join(dir, "agents") });
+    writeStub(env, "node", `echo fake`);
+    writeStub(env, "pi", `echo fake-pi`);
+    writeStub(env, "launchctl", stubbedLaunchctl(), { log: "launchctl.log" });
+    try {
+      const cliPath = new URL("../extensions/tick/bin/pi-tick.mjs", import.meta.url).pathname;
+      copyFileSync(cliPath, join(dir, "pi-tick.mjs"));
+      await withEnv(env, () => cmdAdd(["--enabled", "a7", ...baseAdd], captureIO().io));
+      const j = readCat(dir).jobs.find((j: any) => j.id === "a7");
+      assert.equal(j.enabled, true);
+    } finally { teardownEnv(env); }
+  });
+});
+
+test("cmdLog --failed <id> and cmdRun --manual <id> keep the id", async () => {
+  await withTempDir(async (dir) => {
+    const env = setupEnv({ dataDir: dir, plistDir: join(dir, "agents") });
+    try {
+      const rec = (jobId: string, exitCode: number) => JSON.stringify({
+        jobId, runId: `r-${jobId}-${exitCode}`, startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(), exitCode,
+      });
+      writeFileSync(join(dir, "runs.jsonl"), [rec("lg", 1), rec("lg", 0), rec("other", 1)].join("\n") + "\n");
+      const { cmdLog } = await import("../extensions/tick/bin/commands/log.mjs");
+      const c = captureIO();
+      await withEnv(env, () => cmdLog(["--failed", "lg"], c.io));
+      assert.match(c.o.out, /r-lg-1/);
+      assert.doesNotMatch(c.o.out, /r-lg-0|r-other-1/);
+      const r = captureIO();
+      const code = await withEnv(env, () => cmdRun(["--manual", "nope"], r.io));
+      assert.equal(code, 4);
+      assert.match(r.o.err, /no such job: nope/);
+    } finally { teardownEnv(env); }
+  });
+});
+
+test("cmdAdd --enabled: failed enable rolls back so a retry succeeds; message says not created", async () => {
+  await withTempDir(async (dir) => {
+    const env = setupEnv({ dataDir: dir, plistDir: join(dir, "agents") });
+    writeStub(env, "node", `echo fake`);
+    writeStub(env, "launchctl", stubbedLaunchctl(), { log: "launchctl.log" });
+    try {
+      const cliPath = new URL("../extensions/tick/bin/pi-tick.mjs", import.meta.url).pathname;
+      copyFileSync(cliPath, join(dir, "pi-tick.mjs"));
+      // No pi stub: enable fails.
+      const argv = ["rb", ...baseAdd, "--enabled"];
+      await withEnv(env, () => cmdAdd(argv, IO)).then(
+        () => assert.fail("expected throw"),
+        (err) => { assert.ok(err instanceof PiTickError); assert.match(err.message, /was not created/); },
+      );
+      assert.equal(readCat(dir).jobs.length, 0);
+      // Retry after fixing the cause (pi now present) works instead of "already exists".
+      writeStub(env, "pi", `echo fake-pi`);
+      await withEnv(env, () => cmdAdd(argv, captureIO().io));
+      assert.equal(readCat(dir).jobs.find((j: any) => j.id === "rb").enabled, true);
+    } finally { teardownEnv(env); }
+  });
+});
+
+test("cmdAdd --enabled on an existing id fails 'already exists' and keeps the original job", async () => {
+  await withTempDir(async (dir) => {
+    const env = setupEnv({ dataDir: dir, plistDir: join(dir, "agents") });
+    try {
+      await withEnv(env, () => cmdAdd(["keep", ...baseAdd], captureIO().io));
+      const before = readCat(dir).jobs[0];
+      await withEnv(env, () => cmdAdd(["keep", ...baseAdd, "--enabled"], IO)).then(
+        () => assert.fail("expected throw"),
+        (err) => assert.match(err.message, /already exists/),
+      );
+      assert.deepEqual(readCat(dir).jobs, [before]);
+    } finally { teardownEnv(env); }
+  });
+});
+
+test("validateCwd rejects a regular file; validatePrompt rejects whitespace-only", () => {
+  const f = join(tmpdir(), `pi-tick-cwdfile-${process.pid}`);
+  writeFileSync(f, "x");
+  try {
+    assert.throws(() => validateCwd(f), /not a directory/);
+  } finally { rmSync(f, { force: true }); }
+  assert.throws(() => validatePrompt("   \n\t "), /non-empty/);
+  validatePrompt("  ok  ");
 });

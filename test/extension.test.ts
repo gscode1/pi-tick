@@ -912,3 +912,83 @@ test("sync: N concurrent syncBundledCli calls across separate processes leave a 
     }
   });
 });
+
+// ─── Issue #28 ───────────────────────────────────────────────────────────
+
+test("extension: /tick delete <missing> shows the CLI's stderr, not a success message", async () => {
+  await withCatalog([], async () => {
+    const ext = await loadExtension();
+    const fake = makeFakePi();
+    ext.default(fake as any);
+    const cmd = fake.commands.get("tick")!;
+    const { ctx, notifies } = makeCtx();
+    await cmd.handler!("delete ghost", ctx);
+    assert.equal(notifies.length, 1);
+    assert.match(notifies[0].msg, /no such job: ghost/);
+    assert.doesNotMatch(notifies[0].msg, /deleted job/);
+    assert.equal(notifies[0].level, "warning");
+  });
+});
+
+test("extension: /tick handlers strip quotes from arguments", async () => {
+  await withCatalog([makeJob({ id: "j1" })], async (_env, dataDir) => {
+    const ext = await loadExtension();
+    const fake = makeFakePi();
+    ext.default(fake as any);
+    const cmd = fake.commands.get("tick")!;
+    const { ctx, notifies } = makeCtx();
+    await cmd.handler!(`delete "j1"`, ctx);
+    assert.equal(readCatalog(dataDir).jobs.find((j) => j.id === "j1"), undefined);
+    assert.ok(notifies.some((n) => /deleted job 'j1'/.test(n.msg)));
+  });
+});
+
+test("extension: /tick log --failed <id> keeps the id (boolean flag before id)", async () => {
+  await withCatalog([makeJob({ id: "j1" })], async (_env, dataDir) => {
+    const rec = (jobId: string, exitCode: number) => JSON.stringify({
+      jobId, runId: `r-${jobId}-${exitCode}`, startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(), exitCode,
+    });
+    writeFileSync(join(dataDir, "runs.jsonl"), [rec("j1", 1), rec("j1", 0), rec("other", 1)].join("\n") + "\n");
+    const ext = await loadExtension();
+    const fake = makeFakePi();
+    ext.default(fake as any);
+    const cmd = fake.commands.get("tick")!;
+    const { ctx, notifies } = makeCtx();
+    await cmd.handler!("log --failed j1", ctx);
+    assert.equal(notifies.length, 1);
+    assert.match(notifies[0].msg, /r-j1-1/);
+    assert.doesNotMatch(notifies[0].msg, /r-j1-0|r-other-1/);
+  });
+});
+
+test("extension: completing a bare subcommand prefix (no trailing space) offers the subcommand", async () => {
+  await withCatalog([makeJob({ id: "alpha" })], async () => {
+    const ext = await loadExtension();
+    const fake = makeFakePi();
+    ext.default(fake as any);
+    const cmd = fake.commands.get("tick")!;
+    const values = (await cmd.getArgumentCompletions!("run"))!.map((c: any) => c.value);
+    assert.deepEqual(values, ["run"]);
+    const withSpace = (await cmd.getArgumentCompletions!("run "))!.map((c: any) => c.value);
+    assert.deepEqual(withSpace, ["alpha"]);
+  });
+});
+
+test("extension: tick_create enabled=true that fails to enable reports not created and leaves no job", async () => {
+  await withCatalog([], async (_env, dataDir) => {
+    // No node/pi stubs on the isolated PATH, so enabling fails.
+    const ext = await loadExtension();
+    const fake = makeFakePi();
+    ext.default(fake as any);
+    const tool = fake.tools.get("tick_create")!;
+    const params = { jobId: "tc", prompt: "p", cwd: "/tmp", scheduleKind: "daily", scheduleValue: { time: "09:00" }, enabled: true };
+    const r1 = await tool.execute!("c1", params);
+    assert.equal(r1.isError, true);
+    assert.match(r1.content[0].text, /was not created/);
+    assert.equal(readCatalog(dataDir).jobs.find((j) => j.id === "tc"), undefined);
+    // Retrying without enabled works (no "already exists").
+    const r2 = await tool.execute!("c2", { ...params, enabled: false });
+    assert.notEqual(r2.isError, true);
+    assert.ok(readCatalog(dataDir).jobs.find((j) => j.id === "tc"));
+  });
+});
