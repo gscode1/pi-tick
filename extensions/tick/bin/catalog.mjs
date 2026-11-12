@@ -1,4 +1,5 @@
-import { readFileSync, writeFileSync, appendFileSync, statSync, mkdirSync, unlinkSync, renameSync, existsSync, chmodSync, readdirSync, openSync, closeSync, writeSync, fsyncSync, rmSync } from "node:fs";
+import { readFileSync, writeFileSync, appendFileSync, statSync, mkdirSync, unlinkSync, renameSync, existsSync, chmodSync, readdirSync, openSync, closeSync, writeSync, fsyncSync, rmSync, linkSync, lstatSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import {
   dataDir,
@@ -162,6 +163,78 @@ const ACQUIRE_TIMEOUT_MS = 10_000;
 const STALE_LOCK_MS = 5_000;
 const RETRY_INTERVAL_MS = 50;
 
+// Lock design (issue #22).
+//
+// Acquire is `openSync(lockPath, "wx")` and we write a unique owner token
+// (`pid:uuid`) into the file.
+//
+// Stale reaping must not let two waiters that both judged the same lock
+// stale destroy each other's *fresh* lock. A bare unlink after a stale stat
+// is a check-then-act race. So reaping is serialized by a second short-lived
+// mutex (`<lock>.reap`, also `wx`): only its holder may reap. Under it, the
+// reaper re-stats the lock and, if it is still stale, renames it to a unique
+// name and verifies (ino + mtime) that it moved the very file it judged
+// stale. While the stale lock exists no `wx` acquire can succeed, so the only
+// way the file could change underneath us is its own (resumed) holder
+// releasing it; in that vanishingly rare case the identity check fails and
+// we put the file back with `link` (no-clobber) rather than delete it.
+// A crashed reaper leaves `<lock>.reap` behind; it is removed by age the same
+// way (it is held for microseconds, so staleMs is very generous).
+//
+// Release only unlinks the lock if it still contains our token, so a holder
+// that was reaped (e.g. after a long suspend) cannot delete the lock of
+// whoever acquired it afterwards.
+
+function readToken(path) {
+  try { return readFileSync(path, "utf8"); } catch { return null; }
+}
+
+// Returns true if the caller should retry acquiring immediately.
+function tryReapStale(path, staleMs) {
+  const reapPath = path + ".reap";
+  let rfd;
+  try {
+    rfd = openSync(reapPath, "wx", 0o600);
+  } catch (e) {
+    if (e.code !== "EEXIST") throw e;
+    try {
+      const st = statSync(reapPath);
+      if (st.mtimeMs + staleMs < Date.now()) {
+        const tmp = `${reapPath}.stale.${process.pid}.${randomUUID()}`;
+        renameSync(reapPath, tmp);
+        try { unlinkSync(tmp); } catch { /* */ }
+      }
+    } catch { /* */ }
+    return false;
+  }
+  try {
+    let st;
+    try { st = statSync(path); } catch (e) {
+      if (e.code === "ENOENT") return true;
+      throw e;
+    }
+    if (!(st.mtimeMs + staleMs < Date.now())) return true; // fresh now
+    const tmp = `${path}.stale.${process.pid}.${randomUUID()}`;
+    try { renameSync(path, tmp); } catch (e) {
+      if (e.code === "ENOENT") return true;
+      throw e;
+    }
+    let moved;
+    try { moved = lstatSync(tmp); } catch { return true; }
+    if (moved.ino === st.ino && moved.mtimeMs === st.mtimeMs) {
+      try { unlinkSync(tmp); } catch { /* */ }
+    } else {
+      // Not the file we judged stale: restore without clobbering a new lock.
+      try { linkSync(tmp, path); } catch { /* someone already re-acquired */ }
+      try { unlinkSync(tmp); } catch { /* */ }
+    }
+    return true;
+  } finally {
+    try { closeSync(rfd); } catch { /* */ }
+    try { unlinkSync(reapPath); } catch { /* */ }
+  }
+}
+
 export async function withCatalogLock(fn, opts = {}) {
   ensureDataDirs();
   const lockPath = catalogLockPath();
@@ -169,11 +242,13 @@ export async function withCatalogLock(fn, opts = {}) {
   const staleMs = opts.staleMs ?? STALE_LOCK_MS;
   const retryMs = opts.retryMs ?? RETRY_INTERVAL_MS;
   const deadline = Date.now() + acquireMs;
+  const token = `${process.pid}:${randomUUID()}`;
   let fd = -1;
   const sleepAsync = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   while (true) {
     try {
       fd = openSync(lockPath, "wx", 0o600);
+      try { writeSync(fd, token); } catch { /* ownership unverifiable; release will skip */ }
       break;
     } catch (err) {
       if (err.code !== "EEXIST") throw err;
@@ -185,10 +260,7 @@ export async function withCatalogLock(fn, opts = {}) {
         throw e;
       }
       if (st.mtimeMs + staleMs < Date.now()) {
-        try { unlinkSync(lockPath); } catch (e) {
-          if (e.code !== "ENOENT") throw e;
-        }
-        continue;
+        if (tryReapStale(lockPath, staleMs)) continue;
       }
       if (Date.now() >= deadline) {
         throw new PiTickError("could not acquire catalog lock", 1);
@@ -200,7 +272,10 @@ export async function withCatalogLock(fn, opts = {}) {
     return await fn();
   } finally {
     try { closeSync(fd); } catch { /* */ }
-    try { unlinkSync(lockPath); } catch { /* */ }
+    // Only remove the lock if it is still ours.
+    if (readToken(lockPath) === token) {
+      try { unlinkSync(lockPath); } catch { /* */ }
+    }
   }
 }
 

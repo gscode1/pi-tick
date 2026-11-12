@@ -342,3 +342,102 @@ test("withCatalogLock reaps an 8s-old lock under the default staleMs (issue #52)
     }
   });
 });
+
+// Issue #22 — release must not delete a lock someone else now owns.
+test("release leaves a lock owned by someone else untouched", async () => {
+  await withTempDir(async (dir) => {
+    const env = setupEnv({ dataDir: dir, plistDir: join(dir, "agents") });
+    try {
+      await withEnv(env, async () => {
+        const lockPath = join(dir, "jobs.json.lock");
+        await withCatalogLock(async () => {
+          writeFileSync(lockPath, "999999:someone-else");
+        });
+        assert.equal(readFileSync(lockPath, "utf8"), "999999:someone-else");
+      });
+    } finally {
+      teardownEnv(env);
+    }
+  });
+});
+
+// Issue #22 — a holder that was reaped and then resumes must not remove the
+// lock of the process that acquired it afterwards.
+test("a reaped-then-resumed holder does not remove the new holder's lock", async () => {
+  await withTempDir(async (dir) => {
+    const env = setupEnv({ dataDir: dir, plistDir: join(dir, "agents") });
+    try {
+      await withEnv(env, async () => {
+        const lockPath = join(dir, "jobs.json.lock");
+        await withCatalogLock(async () => {
+          // Simulate: we were reaped, and B took the lock while we were suspended.
+          unlinkSync(lockPath);
+          const fd = openSync(lockPath, "wx", 0o600);
+          writeFileSync(fd, "4242:new-holder");
+          closeSync(fd);
+        });
+        assert.equal(existsSync(lockPath), true, "new holder's lock survives");
+        assert.equal(readFileSync(lockPath, "utf8"), "4242:new-holder");
+      });
+    } finally {
+      teardownEnv(env);
+    }
+  });
+});
+
+// Issue #22 — many processes racing to reap the same stale lock must never
+// both hold it (which lost jobs via overlapping read-modify-write).
+test("concurrent stale-lock reapers never lose an update", { timeout: 60_000 }, async () => {
+  const N = 16;
+  const ROUNDS = 6;
+  const started = Date.now();
+  for (let round = 0; round < ROUNDS; round++) {
+    await withTempDir(async (dir) => {
+      const env = setupEnv({ dataDir: dir, plistDir: join(dir, "agents") });
+      try {
+        writeFileSync(join(dir, "jobs.json"), JSON.stringify({ version: 1, jobs: [] }), { mode: 0o600 });
+        const lockPath = join(dir, "jobs.json.lock");
+        const fd = openSync(lockPath, "w", 0o600);
+        closeSync(fd);
+        const past = new Date(Date.now() - 60_000);
+        utimesSync(lockPath, past, past);
+        // Barrier: all children spin until the same wall-clock instant.
+        const goAt = Date.now() + 1500;
+        const childScript = `
+          import { withCatalogLock, loadCatalog, saveCatalog } from ${JSON.stringify("file://" + CATALOG_PATH)};
+          while (Date.now() < ${goAt}) { /* spin */ }
+          await withCatalogLock(async () => {
+            const c = loadCatalog();
+            c.jobs.push({ id: "job-" + process.env.CHILD_IDX });
+            saveCatalog(c);
+          }, { staleMs: 300, retryMs: 5, acquireMs: 20000 });
+        `;
+        const childEnv = buildChildEnv(env);
+        await Promise.all(
+          Array.from({ length: N }, (_, i) =>
+            new Promise<void>((resolve, reject) => {
+              const child = spawn(
+                process.execPath,
+                ["--input-type=module", "-e", childScript],
+                { env: { ...childEnv, CHILD_IDX: String(i) }, stdio: ["ignore", "pipe", "pipe"] },
+              );
+              let stderr = "";
+              child.stderr.on("data", (c) => { stderr += c.toString("utf8"); });
+              child.on("close", (code) =>
+                code === 0 ? resolve() : reject(new Error(`child ${i} exit ${code}: ${stderr}`)),
+              );
+              child.on("error", reject);
+            }),
+          ),
+        );
+        const final = JSON.parse(readFileSync(join(dir, "jobs.json"), "utf8"));
+        const ids = new Set(final.jobs.map((j: { id: string }) => j.id));
+        assert.equal(ids.size, N, `round ${round}: saved ${ids.size}/${N} jobs`);
+        assert.equal(existsSync(lockPath), false, "lock released");
+      } finally {
+        teardownEnv(env);
+      }
+    });
+  }
+  assert.ok(Date.now() - started < 30_000, "rounds finished in reasonable time");
+});
