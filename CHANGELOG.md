@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.6] - 2026-11-12
 
 ### Changed
 - Interval offsets are rendered as calendar entries on launchd and cron (no more extra hourly runs on launchd; cron now supports offsets); intervals a backend can't express are rejected at add time. `next-fire` accounts for offsets (#24, #27).
