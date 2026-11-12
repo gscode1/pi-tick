@@ -992,6 +992,10 @@ test("cmdRun on a non-existent job exits 4", async () => {
   });
 });
 
+// ISO timestamp `offsetMs` from now, used as a once job's `at` (issue #25:
+// external triggers are only honored near the scheduled slot).
+function onceAt(offsetMs: number) { return new Date(Date.now() + offsetMs).toISOString(); }
+
 async function seedDisabled(env: any, dir: string, piStub: string, extra: any = {}) {
   const catMod = await import(new URL("../extensions/tick/bin/catalog.mjs", import.meta.url).pathname);
   await withEnv(env, () => {
@@ -1139,7 +1143,7 @@ test("cmdRun manually runs a once job without consuming it, then external execut
         const cat = catMod.loadCatalog();
         cat.jobs.push({
           id: "once", prompt: "do thing", cwd: dir,
-          schedule: { kind: "once", value: { at: "2099-01-01T00:05:00.000Z" } },
+          schedule: { kind: "once", value: { at: onceAt(-5 * 60_000) } },
           enabled: true, onceConsumedAt: null, model: null, piPath: piStub,
           createdAt: "x", updatedAt: "x", lastRun: null,
         });
@@ -1178,7 +1182,7 @@ test("cmdRun unregisters a once job only after the run is recorded (bootout kill
         const cat = catMod.loadCatalog();
         cat.jobs.push({
           id: "once", prompt: "do thing", cwd: dir,
-          schedule: { kind: "once", value: { at: "2099-01-01T00:05:00.000Z" } },
+          schedule: { kind: "once", value: { at: onceAt(-5 * 60_000) } },
           enabled: true, onceConsumedAt: null, model: null, piPath: piStub,
           createdAt: "x", updatedAt: "x", lastRun: null,
         });
@@ -2450,4 +2454,194 @@ test("validateCwd rejects a regular file; validatePrompt rejects whitespace-only
   } finally { rmSync(f, { force: true }); }
   assert.throws(() => validatePrompt("   \n\t "), /non-empty/);
   validatePrompt("  ok  ");
+});
+
+// ─── Issues #25 / #29: once-slot guard and corrupt config ───────────────────
+
+async function seedOnce(env: any, dir: string, piStub: string, at: string, extra: any = {}) {
+  const catMod = await import(new URL("../extensions/tick/bin/catalog.mjs", import.meta.url).pathname);
+  await withEnv(env, () => {
+    const cat = catMod.loadCatalog();
+    cat.jobs.push({
+      id: "o", prompt: "p", cwd: dir, schedule: { kind: "once", value: { at } },
+      enabled: true, onceConsumedAt: null, model: null, piPath: piStub,
+      createdAt: "x", updatedAt: "x", lastRun: null, ...extra,
+    });
+    catMod.saveCatalog(cat);
+  });
+  return catMod;
+}
+
+// Launchd env with a launchctl stub that logs every call, plus a plist present
+// so unregister has something to remove.
+function onceEnv(env: any, dir: string) {
+  const log = join(dir, "launchctl.log");
+  const stub = writeStub(env, "launchctl", `echo "$@" >> "${log}"\nexit 0`);
+  mkdirSync(join(dir, "agents"), { recursive: true });
+  writeFileSync(join(dir, "agents", "dev.pi.tick.o.plist"), "<plist/>");
+  return { launchEnv: { ...env, PI_TICK_BACKEND: "launchd", PI_TICK_LAUNCHCTL: stub }, log };
+}
+
+function capture() {
+  const chunks: string[] = [];
+  const w = { write: (s: string) => { chunks.push(s); return true; } } as any;
+  return { io: { stdout: w, stderr: w }, text: () => chunks.join("") };
+}
+
+const readRuns = (dir: string) => existsSync(join(dir, "runs.jsonl"))
+  ? readFileSync(join(dir, "runs.jsonl"), "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l))
+  : [];
+
+test("external once trigger within the grace window runs, consumes and unregisters", async () => {
+  const { ONCE_LATE_GRACE_MS } = await import("../extensions/tick/bin/commands/run.mjs");
+  // slightly late, slightly early, nearly 24h late
+  for (const offset of [-30_000, 30_000, -(ONCE_LATE_GRACE_MS - 60_000)]) {
+    await withTempDir(async (dir) => {
+      const env = setupEnv({ dataDir: dir, plistDir: join(dir, "agents") });
+      const piStub = writeStub(env, "pi", mockPi());
+      try {
+        const catMod = await seedOnce(env, dir, piStub, onceAt(offset));
+        const { launchEnv, log } = onceEnv(env, dir);
+        assert.equal(await withEnv(launchEnv, () => cmdRun(["o"], capture().io)), 0);
+        assert.equal(readRuns(dir).length, 1);
+        const job = await withEnv(launchEnv, () => catMod.loadCatalog().jobs[0]);
+        assert.equal(job.enabled, false);
+        assert.match(job.onceConsumedAt, /^20/);
+        assert.equal(job.onceMissedAt, undefined);
+        assert.match(readFileSync(log, "utf8"), /bootout/);
+      } finally { teardownEnv(env); }
+    });
+  }
+});
+
+test("external once trigger more than 24h late is skipped, marked missed, recorded and unregistered; no child spawned", async () => {
+  await withTempDir(async (dir) => {
+    const env = setupEnv({ dataDir: dir, plistDir: join(dir, "agents") });
+    const marker = join(dir, "pi-spawned");
+    const piStub = writeStub(env, "pi", `echo spawned > "${marker}"\n` + mockPi());
+    try {
+      const catMod = await seedOnce(env, dir, piStub, onceAt(-(25 * 60 * 60 * 1000)));
+      const { launchEnv, log } = onceEnv(env, dir);
+      const c = capture();
+      assert.equal(await withEnv(launchEnv, () => cmdRun(["o"], c.io)), 0);
+      assert.equal(existsSync(marker), false);
+      assert.match(c.text(), /missed its slot/);
+      const job = await withEnv(launchEnv, () => catMod.loadCatalog().jobs[0]);
+      assert.equal(job.enabled, false);
+      assert.match(job.onceConsumedAt, /^20/);
+      assert.match(job.onceMissedAt, /^20/);
+      assert.match(readFileSync(log, "utf8"), /bootout/);
+      const runs = readRuns(dir);
+      assert.equal(runs.length, 1);
+      assert.equal(runs[0].reason, "once_missed");
+      assert.equal(runs[0].jobId, "o");
+      assert.equal(runs[0].triggerKind, "external");
+      // list shows it as missed; a repeat fire is a no-op that adds no record.
+      const out = capture();
+      await withEnv(launchEnv, () => cmdList([], out.io));
+      assert.match(out.text(), /missed/);
+      assert.equal(await withEnv(launchEnv, () => cmdRun(["o"], capture().io)), 0);
+      assert.equal(readRuns(dir).length, 1);
+      assert.equal(existsSync(marker), false);
+    } finally { teardownEnv(env); }
+  });
+});
+
+test("external once trigger before the slot (beyond early grace) is skipped without consuming", async () => {
+  await withTempDir(async (dir) => {
+    const env = setupEnv({ dataDir: dir, plistDir: join(dir, "agents") });
+    const piStub = writeStub(env, "pi", mockPi());
+    try {
+      const catMod = await seedOnce(env, dir, piStub, onceAt(2 * 60 * 60 * 1000));
+      const { launchEnv, log } = onceEnv(env, dir);
+      assert.equal(await withEnv(launchEnv, () => cmdRun(["o"], capture().io)), 0);
+      assert.equal(readRuns(dir).length, 0);
+      const job = await withEnv(launchEnv, () => catMod.loadCatalog().jobs[0]);
+      assert.equal(job.enabled, true);
+      assert.equal(job.onceConsumedAt, null);
+      assert.equal(existsSync(log), false);
+    } finally { teardownEnv(env); }
+  });
+});
+
+test("external trigger of an already-consumed once job unregisters the stale entry", async () => {
+  await withTempDir(async (dir) => {
+    const env = setupEnv({ dataDir: dir, plistDir: join(dir, "agents") });
+    const piStub = writeStub(env, "pi", mockPi());
+    try {
+      await seedOnce(env, dir, piStub, onceAt(-5 * 60_000), { enabled: false, onceConsumedAt: "2026-01-01T00:00:00.000Z" });
+      const { launchEnv, log } = onceEnv(env, dir);
+      assert.equal(await withEnv(launchEnv, () => cmdRun(["o"], capture().io)), 0);
+      assert.equal(readRuns(dir).length, 0);
+      assert.match(readFileSync(log, "utf8"), /bootout/);
+    } finally { teardownEnv(env); }
+  });
+});
+
+test("manual run of a once job ignores the slot: never consumes, never unregisters", async () => {
+  await withTempDir(async (dir) => {
+    const env = setupEnv({ dataDir: dir, plistDir: join(dir, "agents") });
+    const piStub = writeStub(env, "pi", mockPi());
+    try {
+      for (const at of [onceAt(-(400 * 24 * 60 * 60 * 1000)), onceAt(24 * 60 * 60 * 1000)]) {
+        const catMod = await seedOnce(env, dir, piStub, at);
+        const { launchEnv, log } = onceEnv(env, dir);
+        assert.equal(await withEnv(launchEnv, () => cmdRun(["o", "--manual"], capture().io)), 0);
+        const job = await withEnv(launchEnv, () => catMod.loadCatalog().jobs[0]);
+        assert.equal(job.enabled, true);
+        assert.equal(job.onceConsumedAt, null);
+        assert.equal(existsSync(log), false);
+        await withEnv(launchEnv, () => { const cat = catMod.loadCatalog(); cat.jobs = []; catMod.saveCatalog(cat); });
+      }
+      assert.equal(readRuns(dir).length, 2);
+    } finally { teardownEnv(env); }
+  });
+});
+
+test("corrupt config.json: run still executes with the default model, once job runs (not lost), warning printed once", async () => {
+  const catalog = await import("../extensions/tick/bin/catalog.mjs");
+  for (const bad of ['{"defaultModel": "x"', "[1,2]", "null", '"str"']) {
+    await withTempDir(async (dir) => {
+      const env = setupEnv({ dataDir: dir, plistDir: join(dir, "agents") });
+      const piStub = writeStub(env, "pi", mockPiRecordArgs(), { log: "pi-args.log" });
+      try {
+        const catMod = await seedOnce(env, dir, piStub, onceAt(-5 * 60_000));
+        const { launchEnv } = onceEnv(env, dir);
+        await withEnv(launchEnv, () => writeFileSync(configFile(), bad));
+        catalog.resetConfigWarning();
+        const c = capture();
+        assert.equal(await withEnv(launchEnv, () => cmdRun(["o"], c.io)), 0);
+        const runs = readRuns(dir);
+        assert.equal(runs.length, 1);
+        assert.equal(runs[0].exitCode, 0);
+        assert.equal(runs[0].model, null);
+        assert.doesNotMatch(readStubLog(env, "pi-args.log"), /--model/);
+        const job = await withEnv(launchEnv, () => catMod.loadCatalog().jobs[0]);
+        assert.match(job.onceConsumedAt, /^20/); // consumed because it ran
+        // Warned exactly once, and further loads in the process stay quiet.
+        assert.equal((c.text().match(/config file .* is invalid/g) ?? []).length, 1);
+        const w = capture();
+        await withEnv(launchEnv, () => { catalog.loadConfig({ stderr: w.io.stderr }); catalog.loadConfig({ stderr: w.io.stderr }); });
+        assert.equal(w.text(), "");
+      } finally { teardownEnv(env); }
+    });
+  }
+});
+
+test("corrupt config.json: `config get` reports the problem, `config set` repairs the file", async () => {
+  const catalog = await import("../extensions/tick/bin/catalog.mjs");
+  await withTempDir(async (dir) => {
+    const env = setupEnv({ dataDir: dir, plistDir: join(dir, "agents") });
+    try {
+      await withEnv(env, () => { catalog.ensureDataDirs(); writeFileSync(configFile(), "{oops"); });
+      catalog.resetConfigWarning();
+      const c = capture();
+      await assert.rejects(
+        async () => withEnv(env, () => cmdConfig(["get", "default-model"], c.io)),
+        (e: any) => e instanceof PiTickError && /invalid/.test(e.message),
+      );
+      assert.equal(await withEnv(env, () => cmdConfig(["set", "default-model", "m1"], c.io)), 0);
+      assert.equal(await withEnv(env, () => loadConfig().defaultModel), "m1");
+    } finally { teardownEnv(env); }
+  });
 });
