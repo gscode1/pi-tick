@@ -34,7 +34,7 @@ export function cmdList(argv, { stdout = process.stdout, stderr = process.stderr
   const rows = catalog.jobs.map((j) => {
     const active = getActiveRun(j.id);
     const enabled = j.enabled ? "yes" : "no";
-    const status = active ? "running" : (j.enabled ? "scheduled" : "disabled");
+    const status = active ? "running" : (j.enabled ? "scheduled" : (j.onceMissedAt ? "missed" : "disabled"));
     const sched = formatSchedule(j.schedule);
     const next = j.enabled ? formatLocal(formatNextFire(j.schedule)) : "--";
     const lastFinished = active ? "--" : (j.lastRun ? formatLocal(j.lastRun.finishedAt) : "never");

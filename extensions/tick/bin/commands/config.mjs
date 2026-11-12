@@ -27,7 +27,7 @@ export function cmdConfig(argv, { stdout = process.stdout, stderr = process.stde
   ensureDataDirs();
 
   if (sub === "get") {
-    const value = entry.read(loadConfig());
+    const value = entry.read(loadConfig({ stderr, strict: true }));
     stdout.write(value ?? "");
     stdout.write("\n");
     return 0;
@@ -38,14 +38,14 @@ export function cmdConfig(argv, { stdout = process.stdout, stderr = process.stde
     if (raw === undefined) fail(`config set ${key} requires a value`, 2);
     const trimmed = String(raw).trim();
     if (trimmed.length === 0) fail(`config set ${key}: value must be non-empty`, 2);
-    const cfg = loadConfig();
+    const cfg = loadConfig({ stderr });
     saveConfig(entry.write(cfg, trimmed));
     stdout.write(`${key}=${trimmed}\n`);
     return 0;
   }
 
   if (sub === "unset") {
-    const cfg = loadConfig();
+    const cfg = loadConfig({ stderr });
     saveConfig(entry.write(cfg, null));
     stdout.write(`${key} unset\n`);
     return 0;

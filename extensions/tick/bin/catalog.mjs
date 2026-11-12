@@ -134,7 +134,7 @@ export function findJob(catalog, id) {
 // compare-and-set safe when cron/launchd delivers duplicate or concurrent
 // invocations. Returning a copy keeps callers from accidentally mutating the
 // catalog outside the lock.
-export async function claimOnceJob(id) {
+export async function claimOnceJob(id, { missed = false } = {}) {
   let claimed = null;
   await withCatalogLock(async () => {
     const catalog = loadCatalog();
@@ -143,6 +143,9 @@ export async function claimOnceJob(id) {
     const consumedAt = new Date().toISOString();
     job.enabled = false;
     job.onceConsumedAt = consumedAt;
+    // `missed`: the slot passed beyond the grace window, so the job is retired
+    // without running (issue #25). onceMissedAt lets list/show tell it apart.
+    if (missed) job.onceMissedAt = consumedAt;
     job.updatedAt = consumedAt;
     saveCatalog(catalog);
     claimed = JSON.parse(JSON.stringify(job));
@@ -279,11 +282,34 @@ export async function withCatalogLock(fn, opts = {}) {
   }
 }
 
-export function loadConfig() {
+let configWarned = false;
+// Test hook: lets a test observe the once-per-process warning again.
+export function resetConfigWarning() { configWarned = false; }
+
+// A corrupt config.json must never break runs or consume one-shot jobs
+// (issue #29). Default: fall back to defaults and warn once on stderr.
+// `strict: true` (used by `pi-tick config get`) throws instead so the problem
+// is reported rather than hidden behind defaults.
+export function loadConfig({ stderr = process.stderr, strict = false } = {}) {
   const p = configFile();
   if (!existsSync(p)) return { defaultModel: null };
-  const parsed = JSON.parse(readFileSync(p, "utf8"));
-  if (!parsed || typeof parsed !== "object") return { defaultModel: null };
+  let parsed;
+  let problem = null;
+  try {
+    parsed = JSON.parse(readFileSync(p, "utf8"));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) problem = "expected a JSON object";
+  } catch (err) {
+    problem = err && err.message ? err.message : String(err);
+  }
+  if (problem) {
+    const msg = `config file ${p} is invalid (${problem})`;
+    if (strict) throw new PiTickError(msg, 1);
+    if (!configWarned) {
+      configWarned = true;
+      try { stderr.write(`pi-tick: warning: ${msg}; using defaults\n`); } catch { /* */ }
+    }
+    return { defaultModel: null };
+  }
   // Be lenient: drop junk fields, keep `defaultModel` if it's a non-empty string.
   const dm = typeof parsed.defaultModel === "string" && parsed.defaultModel.length > 0
     ? parsed.defaultModel
