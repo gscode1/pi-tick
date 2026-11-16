@@ -181,12 +181,20 @@ automatically.
   A Mac that's asleep with no one logged in will not fire scheduled jobs.
 - **No admin / sudo required.** `~/Library/LaunchAgents/` and per-user
   `launchctl` commands do not require elevation.
-- **The Mac will not wake from sleep for a scheduled fire.** launchd's
-  `StartCalendarInterval` has no wake-the-machine flag. If the Mac is
-  asleep at the scheduled time, the fire is missed. When the Mac wakes,
-  the missed fire is **not** replayed. Same behavior as cron. If "fire
-  even when asleep" is needed, that's a `pmset schedule` problem, out of
-  scope here.
+- **The Mac will not wake from sleep for a scheduled fire.** launchd has
+  no wake-the-machine flag. What happens to a missed fire depends on the
+  schedule kind:
+  - `daily`, `weekly`, `once` and calendar-form intervals use
+    `StartCalendarInterval`. A fire that falls while the Mac is asleep
+    runs **once when it wakes**; several missed fires are coalesced into
+    one. One-shot jobs more than 24h late are not run (see
+    [One-shot schedules](#one-shot-schedules)).
+  - Plain intervals use `StartInterval`. A fire due during sleep is
+    skipped; the next one runs on schedule.
+  - If the Mac was **powered off**, missed fires are not replayed.
+
+  Unlike cron, which skips missed fires on suspend. If "fire even when
+  asleep" is needed, that's a `pmset schedule` problem, out of scope here.
 - **TCC pre-flight is required.** See the install step above. Without it,
   a launchd-fired run that needs to touch `~/Documents` or similar will
   be silently denied.
