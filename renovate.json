@@ -1,0 +1,88 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    "helpers:pinGitHubActionDigests"
+  ],
+  "dependencyDashboard": true,
+  "dependencyDashboardLabels": [
+    "renovate"
+  ],
+  "timezone": "Europe/Warsaw",
+  "minimumReleaseAge": "3 days",
+  "automerge": false,
+  "prHourlyLimit": 2,
+  "prConcurrentLimit": 10,
+  "labels": [
+    "dependencies",
+    "renovate"
+  ],
+  "enabledManagers": [
+    "npm",
+    "github-actions"
+  ],
+  "rangeStrategy": "auto",
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": [
+      "before 5am on Monday"
+    ],
+    "labels": [
+      "dependencies",
+      "renovate"
+    ]
+  },
+  "packageRules": [
+    {
+      "description": "Keep peer dependency ranges wide, never pin them",
+      "matchManagers": [
+        "npm"
+      ],
+      "matchDepTypes": [
+        "peerDependencies"
+      ],
+      "rangeStrategy": "widen"
+    },
+    {
+      "description": "Group non-major npm dev dependencies",
+      "matchManagers": [
+        "npm"
+      ],
+      "matchDepTypes": [
+        "devDependencies"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch"
+      ],
+      "groupName": "npm dev dependencies (non-major)",
+      "groupSlug": "npm-dev-non-major"
+    },
+    {
+      "description": "Group non-major GitHub Actions updates",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch",
+        "digest",
+        "pin",
+        "pinDigest"
+      ],
+      "groupName": "github actions",
+      "groupSlug": "github-actions"
+    },
+    {
+      "description": "Major updates need approval on the dependency dashboard",
+      "matchUpdateTypes": [
+        "major"
+      ],
+      "dependencyDashboardApproval": true,
+      "automerge": false,
+      "addLabels": [
+        "major"
+      ]
+    }
+  ]
+}
