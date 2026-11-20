@@ -417,6 +417,44 @@ console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", 
   });
 }
 
+// Mimic pi 0.79.5's option/@file parsing and RPC prompt protocol.
+test("runJob delivers option-like and file-like prompts verbatim via RPC", async () => {
+  const dir = join(tempDir, "prompt-parser");
+  mkdirSync(dir);
+  const received = join(dir, "received.json");
+  const piPath = join(dir, "pi.mjs");
+  writeFileSync(piPath, `#!/usr/bin/env node
+import { writeFileSync } from "node:fs";
+import { createInterface } from "node:readline";
+const args = process.argv.slice(2);
+let mode, help = false, messages = [], files = [], unknown = [];
+for (let i = 0; i < args.length; i++) {
+  const arg = args[i];
+  if (arg === "--mode" || arg === "--model") { const value = args[++i]; if (arg === "--mode") mode = value; }
+  else if (arg === "--help") help = true;
+  else if (arg === "--no-session" || arg === "-p") continue;
+  else if (arg.startsWith("@")) files.push(arg.slice(1));
+  else if (arg.startsWith("-")) unknown.push(arg);
+  else messages.push(arg);
+}
+if (mode !== "rpc" || help || files.length || unknown.length || messages.length) process.exit(1);
+createInterface({ input: process.stdin }).on("line", line => {
+  const cmd = JSON.parse(line);
+  writeFileSync(${JSON.stringify(received)}, JSON.stringify(cmd));
+  console.log(JSON.stringify({ type: "agent_start" }));
+  console.log(JSON.stringify({ type: "agent_end" }));
+});
+`, { mode: 0o755 });
+  for (const [index, prompt] of ["-x foo", "--help", "@file", "--", "-", "@"].entries()) {
+    const result = await runJob({ ...defaultJob, id: `prompt-${index}`, prompt, cwd: dir }, "manual", {
+      ...getDefaultOptions(), piPath, envPath: `${dirname(process.execPath)}:/usr/bin:/bin`,
+      defaultModel: "test-model",
+    });
+    assert.equal(result.exitCode, 0, result.error ?? `failed for ${prompt}`);
+    assert.deepEqual(JSON.parse(readFileSync(received, "utf8")), { type: "prompt", message: prompt });
+  }
+});
+
 test("runJob records permission failure without interpreting a nonexecutable launcher", async () => {
   const piPath = join(tempDir, "nonexecutable-pi");
   writeFileSync(piPath, "#!/bin/sh\nexit 0\n", { mode: 0o644 });

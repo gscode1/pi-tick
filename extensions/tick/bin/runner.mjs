@@ -166,19 +166,22 @@ function taskflowPrompt(prompt) {
 
 // ─── Phase: spawn plan ──────────────────────────────────────────────────
 // Pure: which pi invocation mode a job runs under and the argv that follow
-// from it. Slash-command jobs run via pi's RPC mode; everything else
+// from it. Slash-command jobs and prompts that pi would parse as options or
+// files run via pi's RPC mode; everything else
 // (including saved taskflows — /tf itself expands to a model turn, and
 // unconstrained scheduled runs often pick the wrong first tool) runs as a
 // one-shot prompt.
 function buildRunArgs(job, { defaultModel }) {
   const tfPrompt = taskflowPrompt(job.prompt);
-  const isSlashCommand = !tfPrompt && job.prompt.trimStart().startsWith("/");
-  const args = isSlashCommand ? ["--mode", "rpc", "--no-session"] : ["--mode", "json", "-p", "--no-session"];
+  // pi 0.79.5 does not support -- as an end-of-options marker. RPC passes
+  // the message over stdin unchanged, avoiding option and @file parsing.
+  const isRpc = !tfPrompt && (job.prompt.trimStart().startsWith("/") || /^[-@]/.test(job.prompt));
+  const args = isRpc ? ["--mode", "rpc", "--no-session"] : ["--mode", "json", "-p", "--no-session"];
   const effectiveModel = job.model ?? defaultModel ?? null;
   if (effectiveModel) args.push("--model", effectiveModel);
   if (tfPrompt) args.push("--tools", "taskflow");
-  if (!isSlashCommand) args.push(tfPrompt || job.prompt);
-  return { isSlashCommand, args, effectiveModel };
+  if (!isRpc) args.push(tfPrompt || job.prompt);
+  return { isRpc, args, effectiveModel };
 }
 
 // ─── Phase: run controls (wall/idle/output-cap timers + kill escalation) ──
@@ -290,7 +293,7 @@ function decodeWithCap(chunk, decoder, budget, maxOutputBytes) {
 }
 
 // ─── Phase: RPC handshake lifecycle ────────────────────────────────────
-// Keeps a slash-command job's (--mode rpc) stdin open until the assistant
+// Keeps an RPC job's (--mode rpc) stdin open until the assistant
 // turn finishes — closing it right after the prompt only proves pi
 // accepted the command, yielding an instant exit 0 with a tiny transcript.
 // `agent_end` closes stdin directly; a `response`/prompt event with no
@@ -298,7 +301,7 @@ function decodeWithCap(chunk, decoder, budget, maxOutputBytes) {
 // to the agent, e.g. a built-in slash command) falls back to closing it
 // too. Also tracks usage/final-text from message_end events, which the
 // run record needs.
-function createRpcLifecycle({ isSlashCommand, child }) {
+function createRpcLifecycle({ isRpc, child }) {
   let agentStarted = false;
   let closeTimer = null;
   let lastUsage = null;
@@ -306,7 +309,7 @@ function createRpcLifecycle({ isSlashCommand, child }) {
   let finalError = null;
 
   const closeStdin = () => {
-    if (isSlashCommand && child.stdin && !child.stdin.destroyed) {
+    if (isRpc && child.stdin && !child.stdin.destroyed) {
       try { child.stdin.end(); } catch { /* pipe already gone */ }
     }
   };
@@ -318,7 +321,7 @@ function createRpcLifecycle({ isSlashCommand, child }) {
       if (closeTimer) { clearTimeout(closeTimer); closeTimer = null; }
     }
     if (evt.type === "agent_end") closeStdin();
-    if (evt.type === "response" && evt.command === "prompt" && isSlashCommand) {
+    if (evt.type === "response" && evt.command === "prompt" && isRpc) {
       closeTimer = setTimeout(() => {
         if (!agentStarted) closeStdin();
       }, 250);
@@ -346,7 +349,7 @@ function createRpcLifecycle({ isSlashCommand, child }) {
 
   return {
     writePrompt: (prompt) => {
-      if (isSlashCommand && child.stdin && !child.stdin.destroyed) {
+      if (isRpc && child.stdin && !child.stdin.destroyed) {
         try {
           child.stdin.write(`${JSON.stringify({ type: "prompt", message: prompt })}\n`);
         } catch { /* pipe already gone; the 'error' listener handles async EPIPE */ }
@@ -492,7 +495,7 @@ export async function runJob(job, trigger, options) {
   const { piPath, transcriptsDir, logsDir, spawnFn = spawn, stderr = process.stderr, envPath, defaultModel } = options;
   const drainMs = Number.isFinite(options.drainMs) ? options.drainMs : STREAM_DRAIN_MS;
 
-  const { isSlashCommand, args, effectiveModel } = buildRunArgs(job, { defaultModel });
+  const { isRpc, args, effectiveModel } = buildRunArgs(job, { defaultModel });
 
   const startedAt = new Date().toISOString();
   const runId = randomBytes(4).toString("hex");
@@ -524,7 +527,7 @@ export async function runJob(job, trigger, options) {
     // Execute Pi directly so the OS handles shell wrappers, shebangs, and binaries.
     child = spawnFn(piPath, args, {
       cwd: job.cwd,
-      stdio: [isSlashCommand ? "pipe" : "ignore", "pipe", "pipe"],
+      stdio: [isRpc ? "pipe" : "ignore", "pipe", "pipe"],
       env,
       // detached makes the child its own process-group leader, so /tick
       // kill (issue #47) can signal -child.pid to reach every descendant
@@ -573,7 +576,7 @@ export async function runJob(job, trigger, options) {
       stderrBuf = (stderrBuf + `stdin error: ${err && err.message}\n`).slice(-16384);
     });
   }
-  const rpc = createRpcLifecycle({ isSlashCommand, child });
+  const rpc = createRpcLifecycle({ isRpc, child });
   // Keep RPC stdin open until the assistant turn finishes (see
   // createRpcLifecycle above for why).
   rpc.writePrompt(job.prompt);
