@@ -1,7 +1,7 @@
 name: merge-ready
 
-# Squash-merges a pull request when gscode1 adds the merge-ready label (a human, or the Renovate agent acting as
-# gscode1 after its review). pull_request_target runs this file from main and never checks out the PR's code.
+# Squash-merges a pull request when gscode1, or the Renovate review agent after a PASS, adds the merge-ready label.
+# pull_request_target runs this file from main and never checks out the PR's code.
 on:
   pull_request_target:
     types: [labeled]
@@ -15,10 +15,16 @@ concurrency:
 
 jobs:
   merge:
+    # gscode1 may label any same-repo PR. The review agent (GitHub App gskode-onecli) may label only Renovate PRs:
+    # opened by gscode1 from a renovate/ branch and labeled renovate. Every cela session shares that App identity.
     if: >-
       github.event.label.name == 'merge-ready' &&
-      github.event.sender.login == 'gscode1' &&
-      github.event.pull_request.head.repo.full_name == github.repository
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      (github.event.sender.login == 'gscode1' ||
+       (github.event.sender.login == 'gskode-onecli[bot]' &&
+        github.event.pull_request.user.login == 'gscode1' &&
+        startsWith(github.event.pull_request.head.ref, 'renovate/') &&
+        contains(github.event.pull_request.labels.*.name, 'renovate')))
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
