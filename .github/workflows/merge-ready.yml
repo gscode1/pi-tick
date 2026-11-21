@@ -1,0 +1,33 @@
+name: merge-ready
+
+# Squash-merges a pull request when gscode1 adds the merge-ready label (a human, or the Renovate agent acting as
+# gscode1 after its review). pull_request_target runs this file from main and never checks out the PR's code.
+on:
+  pull_request_target:
+    types: [labeled]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: merge-ready-${{ github.event.pull_request.number }}
+
+jobs:
+  merge:
+    if: >-
+      github.event.label.name == 'merge-ready' &&
+      github.event.sender.login == 'gscode1' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # --auto: merges once the required check (audit) passes; branch protection on main requires it.
+      # --match-head-commit: a commit pushed after the label was added is not merged.
+      - name: Merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+        run: gh pr merge "$PR" --auto --squash --match-head-commit "$SHA"
