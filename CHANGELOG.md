@@ -16,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Internal: pi invocation (argv plan and RPC/JSON event lifecycle) moved from `runner.mjs` into an agent adapter, `bin/agents/pi.mjs`, behind `agentAdapter()` in `bin/agents/index.mjs`. No behaviour change. Adapter layout adapted from the [samwei12/pi-tick](https://github.com/samwei12/pi-tick) fork (MIT).
 
 ### Fixed
+- Slash-command (RPC) jobs: `agent_end` with `willRetry` no longer closes pi's stdin, so pi's own retry can finish the run.
+- A run whose last assistant message stopped with `aborted` or `toolUse` is now recorded as `model_error` (only `error` was before), when pi exits 0.
+- `lastRun.finalTextPreview` now always reflects the last assistant message; a final message with no text no longer shows an earlier message's text.
 - Prompts starting with `-` or `@` (e.g. `-x foo`, `--help`, `@file`) are now delivered to pi as the message instead of being parsed as options or file arguments (#41).
 
 ## [0.1.6] - 2026-11-12
