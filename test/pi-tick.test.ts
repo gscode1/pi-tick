@@ -335,7 +335,10 @@ test("formatSchedule: interval with non-zero offset appends '+Xm offset' (humani
   assert.equal(out, "every 2m +15m offset");
 });
 
-test("formatNextFire: interval with offset is offset-agnostic by design", () => {
+test("formatNextFire: interval with offset is offset-agnostic by design", (t) => {
+  // Freeze the clock: the two calls below must see the same "now", or a
+  // millisecond tick between them makes a and b differ.
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
   // The display column is a best-effort hint and must not pretend to
   // model the offset — the plist is the source of truth and re-enable
   // shifts the phase. Both shapes must produce the same output.
