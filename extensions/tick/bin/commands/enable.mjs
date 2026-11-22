@@ -80,6 +80,13 @@ export async function cmdEnableInternal(id, { skipCatalogExistsCheck = false, st
       job.piPath = piPath;
       job.nodePath = nodePath;
       job.updatedAt = new Date().toISOString();
+      // What we handed the scheduler, so `pi-tick doctor` can tell a
+      // hand-edited, replaced, or vanished entry from the one we wrote.
+      job.registration = {
+        backend: activeBackend().name,
+        fingerprint: result.fingerprint ?? null,
+        registeredAt: job.updatedAt,
+      };
       saveCatalog(catalog);
     }
   });

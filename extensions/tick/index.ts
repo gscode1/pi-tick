@@ -34,6 +34,7 @@ import { dataDir } from "./bin/paths.mjs";
 // list/run/delete/log/show — no subprocess, no console-output parsing. The
 // stable CLI copy (still synced below) is only for launchd/cron, which spawn it.
 import { dispatch } from "./bin/tick-core.mjs";
+import { attentionSummary } from "./bin/commands/doctor.mjs";
 import { createTick, scheduleOptsFromScheduleValue } from "./bin/commands/add.mjs";
 // The bundle manifest: every .mjs file under bin/ that the standalone CLI's
 // import closure needs installed alongside it. Derived by walking bin/, not
@@ -173,7 +174,7 @@ async function ensureLogsDir(): Promise<void> {
 // ─── Slash commands ──────────────────────────────────────────────────────
 
 // Top-level subcommands under /tick. Used for completions and dispatch.
-const TICK_SUBCOMMANDS = ["list", "run", "kill", "enable", "disable", "delete", "log", "show"] as const;
+const TICK_SUBCOMMANDS = ["list", "run", "kill", "enable", "disable", "delete", "log", "show", "doctor"] as const;
 type TickSubcommand = (typeof TICK_SUBCOMMANDS)[number];
 
 // Split on whitespace, honouring single and double quotes (quotes are
@@ -257,6 +258,13 @@ export default function (pi: ExtensionAPI): void {
         } catch (err) {
           ctx.ui.notify(`pi-tick: logs dir failed: ${err}`, "warning");
         }
+
+        // One notice for jobs that silently stopped or are failing (#61).
+        const attention = attentionSummary();
+        if (attention.count > 0) {
+          const noun = attention.count === 1 ? "tick job needs" : "tick jobs need";
+          ctx.ui.notify(`pi-tick: ${attention.count} ${noun} attention (${attention.ids.join(", ")}); run /tick doctor`, "warning");
+        }
       })();
     }
     await initPromise;
@@ -292,7 +300,7 @@ export default function (pi: ExtensionAPI): void {
       const parsed = parseTickArgs(args);
       if (parsed.sub === null) {
         if (args.trim() === "") {
-          ctx.ui.notify("Usage: /tick <list|run <id>|kill <id>|enable <id>|disable <id>|delete <id>|log [id]|show <id>>", "info");
+          ctx.ui.notify("Usage: /tick <list|run <id>|kill <id>|enable <id>|disable <id>|delete <id>|log [id]|show <id>|doctor [id]>", "info");
           return;
         }
         ctx.ui.notify(`pi-tick: unknown subcommand: ${parsed.rest[0] ?? ""}`, "error");
@@ -382,6 +390,16 @@ export default function (pi: ExtensionAPI): void {
         }
         const n = resultNotice(res, `deleted job '${id}'`);
         ctx.ui.notify(n.text, n.level);
+        return;
+      }
+      if (parsed.sub === "doctor") {
+        // Exit 1 means "jobs need attention", not a failure to run.
+        const res = await runCli(pi, ["doctor", ...parsed.rest]);
+        if (res.code !== 0 && res.code !== 1) {
+          ctx.ui.notify(`pi-tick doctor failed: ${res.stderr.trim() || `exit ${res.code}`}`, "error");
+          return;
+        }
+        ctx.ui.notify(res.stdout.trim() || "(no output)", res.code === 0 ? "info" : "warning");
         return;
       }
       if (parsed.sub === "show" && !parsed.rest[0]) {

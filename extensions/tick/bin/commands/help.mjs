@@ -27,6 +27,7 @@ Usage:
   pi-tick transcripts <id> [--limit N]
   pi-tick show <id> [--run N|--run-id <id>] [--tail M] [--raw] [--no-meta]
   pi-tick config <set|get|unset> <key> [value]
+  pi-tick doctor [id] [--fix] [--json]
   pi-tick help
 
 Interval offsets (--offset-minutes) need whole minutes smaller than the
@@ -40,6 +41,12 @@ exit code decides success and the last stdout line is the run summary.
 
 --on-complete runs an executable after each run is recorded, with the run
 record as JSON on stdin (30s limit). Output: logs/<id>.callback.log.
+
+  pi-tick doctor        # find enabled jobs that silently stopped: missing or
+                        # changed scheduler entry, node/pi/cwd/--on-complete
+                        # path gone (e.g. after an nvm/mise upgrade), missed
+                        # fires, failing last run. Exits 1 if any need attention.
+  pi-tick doctor --fix  # re-register repairable jobs with fresh node/pi paths
 
   pi-tick kill <id>  # terminate a running job and everything it spawned;
                      # sends SIGTERM, then SIGKILL after the grace period

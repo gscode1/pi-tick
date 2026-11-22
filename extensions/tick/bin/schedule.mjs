@@ -303,3 +303,65 @@ export function nextFireAt(schedule, now = new Date()) {
   }
   return "--";
 }
+
+// ─── Previous expected fire (used by `pi-tick doctor`) ───────────────────
+function prevCalendarFormAt(now, form) {
+  const t = new Date(now);
+  t.setSeconds(0, 0);
+  for (let i = 0; i < 24 * 60 + 61; i++) {
+    if (form.minutes.includes(t.getMinutes()) && (form.hours === null || form.hours.includes(t.getHours()))) {
+      return t.toISOString();
+    }
+    t.setMinutes(t.getMinutes() - 1);
+  }
+  return null;
+}
+
+function prevDailyAt(now, hhmm) {
+  const [h, m] = hhmm.split(":").map(Number);
+  const prev = new Date(now);
+  prev.setHours(h, m, 0, 0);
+  if (prev.getTime() > now.getTime()) prev.setDate(prev.getDate() - 1);
+  return prev.toISOString();
+}
+
+function prevWeeklyAt(now, days, hhmm) {
+  const [h, m] = hhmm.split(":").map(Number);
+  let best = null;
+  for (const d of days) {
+    const target = WEEKDAY_TO_INT[d];
+    const cand = new Date(now);
+    cand.setHours(h, m, 0, 0);
+    cand.setDate(cand.getDate() - ((now.getDay() - target + 7) % 7));
+    if (cand.getTime() > now.getTime()) cand.setDate(cand.getDate() - 7);
+    if (best === null || cand.getTime() > best.getTime()) best = cand;
+  }
+  return best ? best.toISOString() : null;
+}
+
+// The most recent time at or before `now` the scheduler should have fired
+// this schedule, as { at: ISO | null, calibrated: boolean }. A plain launchd
+// StartInterval (no offset) counts from load / last run, so it has no fixed
+// phase: `at` is null and `calibrated` false — callers fall back to "last
+// run older than ~2 intervals". `at` is null for a one-shot still in the
+// future.
+export function previousFireAt(schedule, now = new Date()) {
+  const s = schedule;
+  if (s.kind === KIND_INTERVAL) {
+    const total = s.value.minutes * 60 + s.value.seconds;
+    const off = s.value.offset ?? { minutes: 0, seconds: 0 };
+    const offSeconds = off.minutes * 60 + off.seconds;
+    if (offSeconds > 0 || activeBackend().name === "cron") {
+      const form = intervalCalendarForm(total, offSeconds);
+      if (!form.error) return { at: prevCalendarFormAt(now, form), calibrated: true };
+    }
+    return { at: null, calibrated: false };
+  }
+  if (s.kind === KIND_DAILY) return { at: prevDailyAt(now, s.value.time), calibrated: true };
+  if (s.kind === KIND_WEEKLY) return { at: prevWeeklyAt(now, s.value.days, s.value.time), calibrated: true };
+  if (s.kind === KIND_ONCE) {
+    const at = new Date(s.value.at);
+    return { at: at.getTime() <= now.getTime() ? at.toISOString() : null, calibrated: true };
+  }
+  return { at: null, calibrated: false };
+}
