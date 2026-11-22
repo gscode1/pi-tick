@@ -6,7 +6,8 @@ import { ensureDataDirs, loadCatalog, findJob, withCatalogLock, saveCatalog } fr
 import { stableCliPath, logsDir } from "../paths.mjs";
 import { parseFlags } from "../argv.mjs";
 import { fail } from "../errors.mjs";
-import { resolveNodePath, resolvePiPath, augmentedPath } from "../bin-resolve.mjs";
+import { resolveNodePath, augmentedPath } from "../bin-resolve.mjs";
+import { agentAdapter } from "../agents/index.mjs";
 import { activeBackend } from "../backend-info.mjs";
 import { KIND_ONCE, validateOnceAt } from "../schedule.mjs";
 
@@ -25,15 +26,17 @@ export async function cmdEnableInternal(id, { skipCatalogExistsCheck = false, st
   // Validate that the stable script path exists; if not, the session_start
   // sync hasn't run yet.
   if (!existsSync(stableCliPath())) {
-    fail(`stable CLI not found at ${stableCliPath()}; open a pi session once to sync it (session_start copies it)`, 1);
+    fail(`stable CLI not found at ${stableCliPath()}; open a pi session once to sync it (session_start copies it), or run 'node scripts/install.mjs' from a pi-tick checkout`, 1);
   }
 
   const nodePath = resolveNodePath();
   if (!nodePath) {
     fail(`could not resolve 'node' on PATH; install Node.js or set up ~/.local/bin`, 1);
   }
-  const piPath = resolvePiPath();
-  if (!piPath) {
+  const adapter = agentAdapter(preJob.agent);
+  // Command jobs run /bin/sh and need no pi binary.
+  const piPath = adapter.id === "pi" ? adapter.resolve({}) : null;
+  if (adapter.id === "pi" && !piPath) {
     fail(`could not resolve 'pi' on PATH; install pi via 'npm i -g @earendil-works/pi-coding-agent' or symlink it into ~/.local/bin`, 1);
   }
 

@@ -14,7 +14,7 @@ Usage:
                    [--minutes N] [--seconds N] [--at ISO-8601] \\
                    [--offset-minutes N] [--offset-seconds N] \\
                    [--time HH:MM] [--days mon,wed,fri] \\
-                   [--model <id>] [--enabled] \\
+                   [--agent pi|command] [--model <id>] [--enabled] \\
                    [--timeout-ms N] [--idle-timeout-ms N] \\
                    [--max-output-bytes N] [--kill-grace-ms N]
   pi-tick list [--json]
@@ -34,6 +34,9 @@ interval, on a divisor of 60 minutes or an hour count dividing 24 (e.g. 2h +1h).
 cron also needs one of those for plain intervals; launchd accepts any >= 5s.
 
 Jobs are disabled by default; pass --enabled to schedule them.
+
+--agent command runs --prompt as a /bin/sh command line with no model; the
+exit code decides success and the last stdout line is the run summary.
 
   pi-tick kill <id>  # terminate a running job and everything it spawned;
                      # sends SIGTERM, then SIGKILL after the grace period

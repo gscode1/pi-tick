@@ -80,11 +80,9 @@ export function cmdShow(argv, { stdout = process.stdout, stderr = process.stderr
     try { events.push(JSON.parse(line)); } catch { /* skip non-JSON */ }
   }
 
-  if (!noMeta) {
-    const parsed = parseTranscriptFilename(file.name);
-    const rec = parsed ? findRunRecord(parsed.runId) : null;
-    stdout.write(formatRunHeader(file, rec, id) + "\n");
-  }
+  const parsedName = parseTranscriptFilename(file.name);
+  const rec = parsedName ? findRunRecord(parsedName.runId) : null;
+  if (!noMeta) stdout.write(formatRunHeader(file, rec, id) + "\n");
   if (truncNote) stdout.write(truncNote + "\n");
 
   // Optionally trim to the last N assistant turns. A "turn" is one
@@ -115,7 +113,11 @@ export function cmdShow(argv, { stdout = process.stdout, stderr = process.stderr
     }
   }
 
-  const body = prettyPrintTranscript(viewEvents);
+  // Command jobs store plain script output (which may itself be JSON
+  // lines), not agent events: show it verbatim.
+  const body = rec?.agent === "command"
+    ? lineSource.filter((l) => l.trim()).join("\n")
+    : prettyPrintTranscript(viewEvents);
   if (body.length === 0) {
     stdout.write("(no renderable content in this transcript)\n");
   } else {

@@ -7,8 +7,9 @@ import { ensureDataDirs, loadCatalog, findJob, loadConfig, claimOnceJob, appendJ
 import { transcriptsDir, logsDir, runsFile } from "../paths.mjs";
 import { parseFlags } from "../argv.mjs";
 import { fail } from "../errors.mjs";
-import { resolvePiPath, resolveNodePath, augmentedPath } from "../bin-resolve.mjs";
+import { resolveNodePath, augmentedPath } from "../bin-resolve.mjs";
 import { runJob } from "../runner.mjs";
+import { agentAdapter } from "../agents/index.mjs";
 import { getActiveRun } from "../run-registry.mjs";
 import { activeBackend } from "../backend-info.mjs";
 
@@ -95,12 +96,14 @@ export async function cmdRun(argv, { stdout = process.stdout, stderr = process.s
     return 6;
   }
 
-  let piBinary = job.piPath;
+  let adapter;
+  try { adapter = agentAdapter(job.agent); }
+  catch (err) { stderr.write(`pi-tick: ${err.message}\n`); return 7; }
+  const piBinary = adapter.resolve(job);
   if (!piBinary || !existsSync(piBinary)) {
-    piBinary = resolvePiPath();
-  }
-  if (!piBinary || !existsSync(piBinary)) {
-    stderr.write(`pi-tick: could not resolve 'pi' binary; set job.piPath or install pi\n`);
+    stderr.write(adapter.id === "pi"
+      ? `pi-tick: could not resolve 'pi' binary; set job.piPath or install pi\n`
+      : `pi-tick: could not resolve '${piBinary}' for agent ${adapter.id}\n`);
     return 7;
   }
 
