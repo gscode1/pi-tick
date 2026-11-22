@@ -52,6 +52,9 @@ export function buildRunArgs(job, { defaultModel }) {
   return { isSlashCommand, args, effectiveModel };
 }
 
+// stopReasons of a final assistant message that mean the turn did not finish.
+const FAILED_STOP_REASONS = new Set(["error", "aborted", "toolUse"]);
+
 // ─── Phase: RPC handshake lifecycle ────────────────────────────────────
 // Keeps a slash-command job's (--mode rpc) stdin open until the assistant
 // turn finishes — closing it right after the prompt only proves pi
@@ -80,7 +83,10 @@ export function createRpcLifecycle({ isSlashCommand, child }) {
       agentStarted = true;
       if (closeTimer) { clearTimeout(closeTimer); closeTimer = null; }
     }
-    if (evt.type === "agent_end") closeStdin();
+    // pi emits agent_end with willRetry when it is about to retry the turn
+    // (e.g. after a transient provider error); closing stdin then would cut
+    // the retry off. Only the final agent_end closes it.
+    if (evt.type === "agent_end" && !evt.willRetry) closeStdin();
     if (evt.type === "response" && evt.command === "prompt" && isSlashCommand) {
       closeTimer = setTimeout(() => {
         if (!agentStarted) closeStdin();
@@ -91,8 +97,14 @@ export function createRpcLifecycle({ isSlashCommand, child }) {
       if (evt.message.role === "assistant") {
         // The LAST assistant message decides: an earlier error that a retry
         // recovered from must not fail the run (issue #13).
-        finalError = evt.message.stopReason === "error"
-          ? String(evt.message.errorMessage || "model error")
+        // The preview is the last assistant message's text: a final message
+        // with no text must not show an earlier message's text as the result.
+        // A turn that ended aborted, or still waiting on a tool call, did not
+        // finish and fails the run too.
+        finalText = null;
+        const stop = evt.message.stopReason;
+        finalError = FAILED_STOP_REASONS.has(stop)
+          ? String(evt.message.errorMessage || (stop === "error" ? "model error" : `run ended with stopReason ${stop}`))
           : null;
       }
       if (evt.message.role === "assistant" && Array.isArray(evt.message.content)) {
