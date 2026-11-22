@@ -25,6 +25,12 @@ export function logsDir() {
   return join(dataDir(), "logs");
 }
 
+// Per-job files under logsDir(), as `<jobId><suffix>`: the scheduler's
+// stdout/stderr, the --on-complete callback's output, and their rotated
+// copies. Pruned by pruneLogs, removed by `pi-tick delete`.
+export const JOB_LOG_SUFFIXES = [".out.log", ".err.log", ".callback.log"];
+export const JOB_LOG_FILES = JOB_LOG_SUFFIXES.flatMap((s) => [s, `${s}.1`]);
+
 export function stableCliPath() {
   // The "stable" copy of the CLI, synced by the extension to
   // ~/.pi/agent/tick/pi-tick.mjs. launchd plists and crontab entries

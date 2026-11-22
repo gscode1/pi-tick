@@ -11,9 +11,10 @@ import {
   RUNTIME_DEFAULTS,
 } from "./catalog.mjs";
 import { writeActiveRun, clearActiveRun, readKillRequest, processStart } from "./run-registry.mjs";
-import { runsFile } from "./paths.mjs";
+import { runsFile, JOB_LOG_FILES } from "./paths.mjs";
 import { transcriptStartMs } from "./format.mjs";
 import { agentAdapter } from "./agents/index.mjs";
+import { runCallback } from "./callback.mjs";
 
 export const TRANSCRIPT_RETENTION_DAYS = 7;
 export const TRANSCRIPT_MAX_BYTES_PER_JOB = 500 * 1024 * 1024;
@@ -91,7 +92,7 @@ export function pruneTranscripts(jobId, transcriptsDir, { now = Date.now(), stde
 export function pruneLogs(jobId, logsDir, { now = Date.now(), stderr, retentionDays = LOG_RETENTION_DAYS } = {}) {
   const ageCutoff = now - retentionDays * 86400_000;
   const maxBytes = Number.isSafeInteger(LOG_MAX_BYTES_PER_FILE) ? LOG_MAX_BYTES_PER_FILE : 50 * 1024 * 1024;
-  for (const suffix of [".out.log", ".err.log", ".out.log.1", ".err.log.1"]) {
+  for (const suffix of JOB_LOG_FILES) {
     const p = join(logsDir, `${jobId}${suffix}`);
     try {
       const st = statSync(p);
@@ -327,6 +328,15 @@ function buildRunRecord({
   return record;
 }
 
+// runJob's result carries the --on-complete callback's promise as a
+// non-enumerable `callback` (resolves to its status, or null when the job
+// has none). runJob itself does not wait for it; a caller that is about to
+// exit (cmdRun) must.
+function withCallback(result, callback) {
+  Object.defineProperty(result, "callback", { value: callback, enumerable: false });
+  return result;
+}
+
 // ─── Phase: catalog bookkeeping + prune trigger ────────────────────────
 // Records the run on job.lastRun under the catalog lock, then — throttled
 // per-job via lastPrunedAt (TRANSCRIPT_PRUNE_THROTTLE_MS) so high-frequency
@@ -439,7 +449,10 @@ export async function runJob(job, trigger, options) {
     await updateLastRunAndPrune(job.id, record, {
       transcriptPath: existingTranscriptPath, finishedAt, transcriptsDir, logsDir, stderr,
     });
-    return { ...record, transcriptPath: existingTranscriptPath, transcriptBytes: existingTranscriptPath ? 0 : null };
+    return withCallback(
+      { ...record, transcriptPath: existingTranscriptPath, transcriptBytes: existingTranscriptPath ? 0 : null },
+      runCallback(job, record, { logsDir, stderr }),
+    );
   }
 
   // Record the run as active only once the child actually exists. `pid`
@@ -594,7 +607,10 @@ export async function runJob(job, trigger, options) {
       syncSignalHandlers();
       markFinished();
 
-      resolve({
+      // --on-complete runs only now: the run is recorded and no longer
+      // active, so a slow callback cannot hold the job's slot or delay
+      // `pi-tick kill`/concurrency checks.
+      resolve(withCallback({
         exitCode: record.exitCode,
         reason: record.reason,
         error: record.error,
@@ -605,7 +621,7 @@ export async function runJob(job, trigger, options) {
         transcriptBytes,
         tokens: record.tokens,
         finalTextPreview: record.finalTextPreview,
-      });
+      }, runCallback(job, record, { logsDir, stderr })));
     };
 
     child.on("error", (err) => {

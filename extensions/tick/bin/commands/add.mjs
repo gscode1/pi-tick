@@ -9,6 +9,7 @@
 // (`list --json`) just to recover a job object cmdAdd already held in
 // memory.
 
+import { isAbsolute } from "node:path";
 import { agentAdapter } from "../agents/index.mjs";
 import { ensureDataDirs, loadCatalog, saveCatalog, findJob, withCatalogLock } from "../catalog.mjs";
 import { parseFlags, flagString, flagOptionalString, flagOptionalU32 } from "../argv.mjs";
@@ -57,6 +58,10 @@ export async function createTick(params, { stdout = process.stdout, stderr = pro
   try { agent = agentAdapter(params.agent == null ? "pi" : String(params.agent)).id; }
   catch (err) { fail(err.message, 2); }
   if (agent === "command" && model) fail(`command jobs run a shell command and take no --model`, 2);
+  const onComplete = params.onComplete == null ? null : params.onComplete;
+  if (onComplete !== null && (typeof onComplete !== "string" || !isAbsolute(onComplete))) {
+    fail(`--on-complete must be an absolute path to an executable`, 2);
+  }
 
   // Runtime controls arrive as plain numbers here (CLI flags are parsed by
   // the caller, the tool's params are already numbers) — reuse
@@ -95,6 +100,7 @@ export async function createTick(params, { stdout = process.stdout, stderr = pro
     ...(kind === KIND_ONCE ? { onceConsumedAt: null } : {}),
     model,
     ...(agent !== "pi" ? { agent } : {}),
+    ...(onComplete ? { onComplete } : {}),
     piPath: null,
     nodePath: null,
     createdAt: now,
@@ -171,6 +177,7 @@ export async function cmdAdd(argv, { stdout = process.stdout, stderr = process.s
   const enabled = flags.enabled === true || flags.enabled === "true";
   const model = flagOptionalString(flags, "model");
   const agent = flagOptionalString(flags, "agent");
+  const onComplete = flagOptionalString(flags, "on-complete");
   // A bare value flag becomes `true`, which downstream validators would
   // coerce (Number(true) === 1) or stringify; reject it up front.
   for (const name of ["minutes", "seconds", "offset-minutes", "offset-seconds", "time", "days", "at"]) {
@@ -185,8 +192,10 @@ export async function cmdAdd(argv, { stdout = process.stdout, stderr = process.s
     scheduleOpts: flags,
     enabled,
     model,
-    // CLI-only: the tick_create tool never passes an agent (see agents/command.mjs).
+    // CLI-only: the tick_create tool never passes an agent or onComplete
+    // (see agents/command.mjs and callback.mjs).
     agent,
+    onComplete,
     // Raw flag values (string, `true` for a bare flag, or undefined) —
     // createTick is the single place that runs them through
     // flagOptionalU32's validation, for both this CLI path and the tool.

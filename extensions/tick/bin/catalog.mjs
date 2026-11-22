@@ -6,6 +6,7 @@ import {
   jobsFile,
   runsFile,
   logsDir,
+  JOB_LOG_FILES,
   transcriptsDir,
   configFile,
 } from "./paths.mjs";
@@ -53,7 +54,7 @@ export function transcriptJobDir(jobId) {
 // lock") avoids re-spreading the grab-bag that issue #43 consolidated.
 
 export function cleanupJobArtifacts(id, { stderr }) {
-  for (const p of [join(logsDir(), `${id}.out.log`), join(logsDir(), `${id}.err.log`), join(logsDir(), `${id}.out.log.1`), join(logsDir(), `${id}.err.log.1`)]) {
+  for (const p of JOB_LOG_FILES.map((suffix) => join(logsDir(), `${id}${suffix}`))) {
     try { unlinkSync(p); } catch (err) {
       if (err && err.code === "ENOENT") continue;
       stderr.write(`pi-tick: delete: ${err.message}\n`);

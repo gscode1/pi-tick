@@ -14,7 +14,7 @@ Usage:
                    [--minutes N] [--seconds N] [--at ISO-8601] \\
                    [--offset-minutes N] [--offset-seconds N] \\
                    [--time HH:MM] [--days mon,wed,fri] \\
-                   [--agent pi|command] [--model <id>] [--enabled] \\
+                   [--agent pi|command] [--model <id>] [--on-complete <abs path>] [--enabled] \\
                    [--timeout-ms N] [--idle-timeout-ms N] \\
                    [--max-output-bytes N] [--kill-grace-ms N]
   pi-tick list [--json]
@@ -37,6 +37,9 @@ Jobs are disabled by default; pass --enabled to schedule them.
 
 --agent command runs --prompt as a /bin/sh command line with no model; the
 exit code decides success and the last stdout line is the run summary.
+
+--on-complete runs an executable after each run is recorded, with the run
+record as JSON on stdin (30s limit). Output: logs/<id>.callback.log.
 
   pi-tick kill <id>  # terminate a running job and everything it spawned;
                      # sends SIGTERM, then SIGKILL after the grace period
