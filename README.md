@@ -4,7 +4,8 @@
 > launchd (macOS) or cron (Linux).
 
 Register a prompt + a schedule, and `pi-tick` fires it via your OS's
-native scheduler. The runner spawns `pi` in a fresh session, captures
+native scheduler. The runner spawns `pi` in a fresh session (or, for
+[command jobs](#command-jobs---agent-command), a plain shell command), captures
 the full event stream as a per-run **transcript**, and writes a
 `RunRecord` to `runs.jsonl`. Prompts starting with `/` use Pi RPC mode
 so slash commands execute as commands, not model-interpreted text. Jobs
@@ -19,7 +20,7 @@ exactly on time — the scheduler owns the timer.
 - Use the `/tick` slash command inside Pi to list, run, and delete jobs.
 - Use the `tick_create` / `tick_list` / `tick_delete` LLM tools to schedule
   from inside an agent session.
-- launchd fires the job at the scheduled time; the runner streams the full
+- launchd or cron fires the job at the scheduled time; the runner streams the full
   transcript, writes a `RunRecord` to `runs.jsonl`, and updates `lastRun` on
   the catalog. Transcripts are kept for 7 days or 500 MB per job, whichever
   comes first.
@@ -84,9 +85,10 @@ pi-tick delete nightly-recap
 | `pi-tick enable <id>` | Register / re-register the launchd plist. Idempotent. |
 | `pi-tick disable <id>` | Unload the plist and rename it to `.plist.disabled`. |
 | `pi-tick run <id> [--manual]` | Fire a job. With `--manual` it runs even if the job is disabled; without it (scheduler path) disabled jobs are skipped with exit 0. Only one run per job at a time: a start while the job is already running is refused (exit 5 with `--manual`, exit 0 from the scheduler). SIGTERM/SIGINT to the runner kills pi's process tree and records the run as `terminated` (exit 143). |
+| `pi-tick kill <id> [--grace-ms N]` | Terminate a running job's process group: SIGTERM, then SIGKILL after the grace period (default 5s). The run is recorded as `killed` (exit 143). |
 | `pi-tick log [id] [--limit N] [--failed] [--since <dur>]` | Tail the run log. `--failed` keeps only non-zero exits; `--since` keeps runs in the last `<dur>` (`30s`/`5m`/`2h`/`1d`). |
 | `pi-tick transcripts <id> [--limit N]` | List transcript files for a job, newest first. |
-| `pi-tick show <id> [--run N] [--tail M] [--raw] [--no-meta]` | Chat-style view of a transcript (default: latest). `--run N` picks the Nth most recent. `--tail M` keeps the last M assistant turns. `--raw` emits JSONL events, one per line (`event:` prefix for `jq` pipelines). `--no-meta` skips the run header. |
+| `pi-tick show <id> [--run N\|--run-id <id>] [--tail M] [--raw] [--no-meta]` | Chat-style view of a transcript (default: latest). `--run N` picks the Nth most recent; `--run-id` picks a run shown by `pi-tick log`. `--tail M` keeps the last M assistant turns. `--raw` emits JSONL events, one per line (`event:` prefix for `jq` pipelines). `--no-meta` skips the run header. |
 | `pi-tick config <set\|get\|unset> <key> [value]` | Read or write tick-scoped config. Today: `default-model` (see below). |
 | `pi-tick help` | Print usage. |
 
@@ -101,8 +103,19 @@ Flags for `add`:
 - `--at ISO-8601` — for `once`; absolute future timestamp with `:00` seconds and no fractional milliseconds
 - `--time HH:MM` — for `daily` and `weekly` (24h)
 - `--days mon,wed,fri` — for `weekly` (comma-separated, case-insensitive)
-- `--model <id>` — optional, passed to `pi` as `--model`
-- `--enabled` — also register the launchd plist in the same call
+- `--model <id>` — optional, passed to `pi` as `--model` (rejected for command jobs)
+- `--agent pi|command` — optional, default `pi`; see [Command jobs](#command-jobs---agent-command). CLI-only.
+- `--on-complete <abs path>` — optional executable run after each run; see [Completion hook](#completion-hook---on-complete). CLI-only.
+- `--enabled` — also register the schedule (launchd plist / crontab entry) in the same call
+
+Runtime limits (all optional, in ms/bytes; `0` disables where allowed):
+
+| Flag | Default | Effect |
+|---|---|---|
+| `--timeout-ms N` | 30 min | Wall-clock cap; the run is recorded as `timeout` (exit 124). |
+| `--idle-timeout-ms N` | off | Cap on time with no stdout/stderr output (`idle_timeout`). |
+| `--max-output-bytes N` | off | Transcript size cap; the child is killed when exceeded. |
+| `--kill-grace-ms N` | 5000 | Delay between SIGTERM and SIGKILL (must be ≥ 1). |
 
 ### Default model
 
@@ -121,6 +134,14 @@ pi-tick config set default-model MiniMax-M3
 pi-tick config get default-model     # prints MiniMax-M3
 pi-tick config unset default-model   # back to step 3
 ```
+
+### Agents
+
+Each job runs through an agent adapter (`extensions/tick/bin/agents/`):
+
+- `pi` (default) — runs `pi --mode json` (or `--mode rpc` for `/slash`
+  prompts) with the job's prompt and model.
+- `command` — runs the prompt as a shell command line, no model (below).
 
 ### Command jobs (`--agent command`)
 
@@ -174,9 +195,12 @@ Argument completion works for all of these.
 
 | Tool | Args | Returns |
 |---|---|---|
-| `tick_create` | `jobId, prompt, cwd, scheduleKind, scheduleValue, enabled?, model?` | The new job (JSON). `scheduleKind=once` uses `scheduleValue.at`; interval/daily/weekly remain recurring. |
+| `tick_create` | `jobId, prompt, cwd, scheduleKind, scheduleValue, enabled?, model?, timeoutMs?, idleTimeoutMs?, maxOutputBytes?, killGraceMs?` | The new job (JSON). `scheduleKind=once` uses `scheduleValue.at`; interval/daily/weekly remain recurring. |
 | `tick_list` | — | The catalog as a JSON array. |
 | `tick_delete` | `jobId` | Confirmation. |
+
+`tick_create` always creates pi jobs: `agent` and `onComplete` are CLI-only,
+so a model can neither schedule a shell command nor attach a hook.
 
 The LLM can create-and-enable in one call by passing `enabled: true` to
 `tick_create`. It cannot enable or disable existing jobs — to do that, the
@@ -188,7 +212,7 @@ hasn't already approved by creating.
 
 ```
 LLM tool    ──┐
-slash cmd   ──┼──►  extensions/tick/index.ts  ──spawn──►  pi-tick.mjs  ──spawn──►  pi
+slash cmd   ──┼──►  extensions/tick/index.ts  ──spawn──►  pi-tick.mjs  ──spawn──►  pi or /bin/sh (agent adapter)
 terminal    ──┘                            │
                                           ├─► jobs.json       (mode 0600)
                                           ├─► runs.jsonl      (mode 0600)
@@ -341,20 +365,25 @@ still create-and-enable in one call by passing `enabled: true` to
 ```
 ~/.pi/agent/tick/                         # data dir, created on first session_start
 ├── jobs.json                             # the catalog (mode 0600)
-├── runs.jsonl                            # append-only audit log (mode 0600)
+├── runs.jsonl                            # append-only audit log (mode 0600; rotates to runs.jsonl.1 above 10 MB)
+├── config.json                           # tick-scoped config (default-model)
 ├── pi-tick.mjs                           # stable copy of the CLI (mode 0755)
 ├── runs/                                 # per-job transcripts (mode 0700)
 │   └── nightly-recap/                    # one dir per job
 │       └── 2026-06-15T02-00-04-123Z_7c8a1234.jsonl
-└── logs/                                 # launchd stdout/stderr (mode 0700)
+└── logs/                                 # scheduler + hook output (mode 0700)
     ├── nightly-recap.out.log
-    └── nightly-recap.err.log
-
-**Retention:** Each per-job log file (`logs/<id>.out.log`, `logs/<id>.err.log`) is capped by default to 7 days of age and 50 MB in size. Size-capping truncates the head of the file and preserves the tail (the most recent bytes). These thresholds can be overridden via the `PI_TICK_LOG_RETENTION_DAYS` and `PI_TICK_LOG_MAX_BYTES` environment variables.
+    ├── nightly-recap.err.log
+    └── nightly-recap.callback.log        # --on-complete output
 
 ~/Library/LaunchAgents/
-└── dev.pi.tick.<jobId>.plist             # one per enabled job
+└── dev.pi.tick.<jobId>.plist             # one per enabled job (macOS)
 ```
+
+**Log retention:** each per-job log file (`.out.log`, `.err.log`,
+`.callback.log`) is deleted once older than 7 days, and rotated to `<file>.1`
+when larger than 50 MB. Override with `PI_TICK_LOG_RETENTION_DAYS` and
+`PI_TICK_LOG_MAX_BYTES`.
 
 ### `jobs.json`
 
@@ -391,12 +420,14 @@ still create-and-enable in one call by passing `enabled: true` to
 - `id` — `^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`. Used as the plist label suffix.
 - `prompt` — non-empty, ≤ 16 KB.
 - `cwd` — absolute path; must exist at create-time.
-- `schedule` — one of `interval` (≥ 5s), `daily` (HH:MM), `weekly` (days + HH:MM).
+- `schedule` — one of `interval` (≥ 5s on launchd, ≥ 60s on cron), `daily` (HH:MM), `weekly` (days + HH:MM), `once` (ISO-8601 `at`).
 - `enabled` — boolean. **Default `false` on `add`.**
 - `model` — optional; passed to `pi` as `--model`.
 - `piPath` — internal; set by `enable` after resolving `which pi`.
 - `agent` — optional; `"command"` for command jobs. Absent means pi.
 - `onComplete` — optional; absolute path of the `--on-complete` executable.
+- `timeoutMs`, `idleTimeoutMs`, `maxOutputBytes`, `killGraceMs` — runtime
+  limits; `null` means the runner's default.
 - `lastRun` — written by the runner; `null` until first run. Carries the
   same fields as a `RunRecord` (see below) plus `transcriptPath` and
   `finalTextPreview` so a fresh `pi-tick show <id>` can render the latest
@@ -408,10 +439,19 @@ still create-and-enable in one call by passing `enabled: true` to
 One JSON object per line, append-only:
 
 ```json
-{"runId":"7c8a1234","jobId":"nightly-recap","triggerKind":"external","startedAt":"2026-06-15T02:00:04.123Z","finishedAt":"2026-06-15T02:00:47.890Z","exitCode":0,"error":null,"tokens":{"input":1234,"output":567},"transcriptPath":"/Users/me/.pi/agent/tick/runs/nightly-recap/2026-06-15T02-00-04-123Z_7c8a1234.jsonl","transcriptBytes":12083,"finalTextPreview":"Done. Wrote .scratch/recap.md."}
+{"runId":"7c8a1234","jobId":"nightly-recap","triggerKind":"external","startedAt":"2026-06-15T02:00:04.123Z","finishedAt":"2026-06-15T02:00:47.890Z","exitCode":0,"reason":"exit_code","error":null,"model":"claude-sonnet-4-5","tokens":{"input":1234,"output":567},"transcriptPath":"/Users/me/.pi/agent/tick/runs/nightly-recap/2026-06-15T02-00-04-123Z_7c8a1234.jsonl","transcriptBytes":12083,"finalTextPreview":"Done. Wrote .scratch/recap.md."}
 ```
 
-- `triggerKind` — `"external"` (launchd) or `"manual"` (`/tick run` or `pi-tick run`).
+- `triggerKind` — `"external"` (launchd/cron) or `"manual"` (`/tick run` or `pi-tick run`).
+- `reason` — why the run ended: `exit_code`, `signal`, `spawn_error`,
+  `model_error`, `taskflow_failed`, `timeout`, `idle_timeout`, `killed`,
+  `terminated`, `output_cap`, or `once_missed`. `error` holds the
+  message (≤ 200 chars) when `exitCode` is non-zero.
+- `agent` — present only for non-pi jobs (`"command"`).
+- A pi run counts as failed (`model_error`) when pi exits 0 but the last
+  assistant message stopped with `error`, `aborted` or `toolUse`. With pi
+  1.1+, a reply cut off at the model's output token limit makes `pi` exit 1,
+  so the run is recorded as failed with pi's warning as the error.
 - `tokens` — `{ input, output }` from the final `message_end` event. Anthropic-style cache fields (`cacheRead`, `cacheWrite`) are dropped from the record; the raw JSONL transcript preserves them.
 - `transcriptPath` / `transcriptBytes` — pointer to the full event stream
   in `runs/<jobId>/`. Survives even if the transcript file is later pruned.
@@ -493,11 +533,12 @@ npm test
 npm run test:macos
 ```
 
-Tests use Node's built-in `node:test` runner. No external dependencies.
+Tests use Node's built-in `node:test` runner and run against pi 1.6
+(`@earendil-works/pi-coding-agent` / `pi-ai` dev dependencies).
 The launchctl and `pi` calls are stubbed via PATH overrides; the test
 suite does not touch the user's real data dir or LaunchAgents.
 
-The current suite has **286 tests** across the CLI, catalog, extension,
+The current suite has **430 tests** across the CLI, catalog, extension,
 backends, runner, and transcript behavior (the macOS-only launchd smoke test
 is run separately via `npm run test:macos`).
 
