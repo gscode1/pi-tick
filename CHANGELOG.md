@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-22
+
 ### Added
 - `pi-tick add --agent command`: run the prompt as a `/bin/sh` command line with no model; exit code decides success and the last stdout line is the summary. CLI-only, not exposed to `tick_create`.
 - `pi-tick add --on-complete <abs path>`: run an executable after each run with the run record on stdin. Starts after the run is recorded and inactive, 30s limit, output in `logs/<id>.callback.log` (pruned with the other job logs). CLI-only.
