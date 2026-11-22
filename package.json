@@ -42,14 +42,15 @@
     "sync": "node scripts/sync-cli.mjs",
     "install:cli": "node scripts/install.mjs"
   },
-  "dependencies": {},
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
     "typebox": "*"
   },
   "devDependencies": {
-    "typescript": "^5.4.0",
-    "typebox": "^1.2.16"
+    "@earendil-works/pi-ai": "^1.6.0",
+    "@earendil-works/pi-coding-agent": "^1.6.0",
+    "typebox": "^1.2.16",
+    "typescript": "^5.4.0"
   }
 }

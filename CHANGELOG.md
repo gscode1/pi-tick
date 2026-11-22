@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Tested against pi 1.6: `@earendil-works/pi-coding-agent` and `@earendil-works/pi-ai` are now dev dependencies at `^1.6.0` (the lockfile had pinned pi 0.79.5), so tests and Renovate track current pi.
+- With pi 1.1 or later, a run whose reply is cut off at the model's output token limit is recorded as failed: `pi -p` now exits 1 there and pi's warning becomes the run error. Earlier pi versions exited 0 and the run was recorded as a success.
+- `pi-tick run --manual` prints a notice on stderr when it is still waiting for an `--on-complete` callback after a second, instead of looking hung for up to 30s.
+
+### Fixed
+- `pi-tick add --on-complete` rejects a path that does not exist, is not a file, or is not executable, instead of only failing later in `logs/<id>.callback.log`.
+
+### Docs
+- README: a prompt starting with `--` needs the `--prompt='--foo'` form.
+
 ## [0.2.0] - 2026-11-22
 
 ### Added
