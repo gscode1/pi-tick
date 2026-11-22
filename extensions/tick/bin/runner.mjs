@@ -257,7 +257,7 @@ function buildRunRecord({
   runId, jobId, triggerKind, startedAt, finishedAt,
   code, signal, spawnErr, killReason, transcriptWriteError,
   stderrBuf, finalText, finalError, effectiveModel, lastUsage,
-  transcriptPath, transcriptBytes,
+  transcriptPath, transcriptBytes, agent = "pi",
 }) {
   let exitCode = typeof code === "number" ? code : 1;
   let error = null;
@@ -288,7 +288,9 @@ function buildRunRecord({
     reason = "model_error";
     error = finalError.slice(0, 200);
   } else if (exitCode === 0) {
-    const taskflowFailure = extractTaskflowFailure(finalText);
+    // Taskflow failures are reported in pi's final text; a command job's
+    // stdout is the script's own business.
+    const taskflowFailure = agent === "pi" ? extractTaskflowFailure(finalText) : null;
     if (taskflowFailure) {
       exitCode = 1;
       reason = "taskflow_failed";
@@ -299,13 +301,15 @@ function buildRunRecord({
   } else {
     reason = "exit_code";
     const sig = extractStderrSignature(stderrBuf);
-    const fallback = stderrBuf.trim().split("\n").pop() || "";
+    // Command jobs often report failures on stdout; fall back to its last line.
+    const fallback = stderrBuf.trim().split("\n").pop() || (agent === "command" ? finalText : "") || "";
     error = (sig || fallback).slice(0, 200) || null;
   }
 
   const record = {
     runId, jobId, triggerKind, startedAt, finishedAt, exitCode, reason, error, model: effectiveModel,
   };
+  if (agent !== "pi") record.agent = agent;
   if (lastUsage) {
     const inp = lastUsage.input || lastUsage.inputTokens || 0;
     const outp = lastUsage.output || lastUsage.outputTokens || 0;
@@ -345,6 +349,7 @@ async function updateLastRunAndPrune(jobId, record, { transcriptPath, finishedAt
         };
         if (transcriptPath) j.lastRun.transcriptPath = transcriptPath;
         if (record.tokens) j.lastRun.tokens = record.tokens;
+        if (record.agent) j.lastRun.agent = record.agent;
         if (record.finalTextPreview) j.lastRun.finalTextPreview = record.finalTextPreview;
         j.updatedAt = finishedAt;
 
@@ -379,6 +384,8 @@ export async function runJob(job, trigger, options) {
 
   const adapter = agentAdapter(job.agent);
   const { isSlashCommand, args, effectiveModel } = adapter.plan(job, { defaultModel });
+  // piPath is the pi binary; other adapters name their own executable.
+  const executable = adapter.id === "pi" ? piPath : adapter.resolve(job);
 
   const startedAt = new Date().toISOString();
   const runId = randomBytes(4).toString("hex");
@@ -402,13 +409,14 @@ export async function runJob(job, trigger, options) {
 
   const triggerKind = trigger || "external";
 
-  const env = { ...process.env, CONTEXT_MODE_BRIDGE_DEPTH: process.env.CONTEXT_MODE_BRIDGE_DEPTH || "1" };
+  // PWD matches cwd so shells and tools that trust $PWD see the job's directory.
+  const env = { ...process.env, PWD: job.cwd, CONTEXT_MODE_BRIDGE_DEPTH: process.env.CONTEXT_MODE_BRIDGE_DEPTH || "1" };
   if (envPath) env.PATH = envPath;
 
   let child;
   try {
     // Execute Pi directly so the OS handles shell wrappers, shebangs, and binaries.
-    child = spawnFn(piPath, args, {
+    child = spawnFn(executable, args, {
       cwd: job.cwd,
       stdio: [isSlashCommand ? "pipe" : "ignore", "pipe", "pipe"],
       env,
@@ -423,7 +431,7 @@ export async function runJob(job, trigger, options) {
     const existingTranscriptPath = transcriptPath && existsSync(transcriptPath) ? transcriptPath : null;
     const record = buildRunRecord({
       runId, jobId: job.id, triggerKind, startedAt, finishedAt,
-      spawnErr: err, stderrBuf: "", finalText: "", effectiveModel,
+      spawnErr: err, stderrBuf: "", finalText: "", effectiveModel, agent: adapter.id,
       transcriptPath: existingTranscriptPath, transcriptBytes: existingTranscriptPath ? 0 : null,
     });
     try { appendJsonl(runsFile(), record); } catch { /* best effort */ }
@@ -573,7 +581,7 @@ export async function runJob(job, trigger, options) {
         runId, jobId: job.id, triggerKind, startedAt, finishedAt,
         code, signal, spawnErr, killReason, transcriptWriteError,
         stderrBuf, finalText: rpc.getFinalText(), finalError: rpc.getFinalError(), effectiveModel, lastUsage: rpc.getLastUsage(),
-        transcriptPath, transcriptBytes,
+        transcriptPath, transcriptBytes, agent: adapter.id,
       });
 
       try { appendJsonl(runsFile(), record); } catch { /* best effort */ }

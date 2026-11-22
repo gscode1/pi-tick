@@ -7,7 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `pi-tick add --agent command`: run the prompt as a `/bin/sh` command line with no model; exit code decides success and the last stdout line is the summary. CLI-only, not exposed to `tick_create`.
+- `scripts/install.mjs` (`npm run install:cli`): install the CLI from a source checkout without opening a pi session.
+
 ### Changed
+- Jobs run with `PWD` set to the job's cwd.
 - Internal: pi invocation (argv plan and RPC/JSON event lifecycle) moved from `runner.mjs` into an agent adapter, `bin/agents/pi.mjs`, behind `agentAdapter()` in `bin/agents/index.mjs`. No behaviour change. Adapter layout adapted from the [samwei12/pi-tick](https://github.com/samwei12/pi-tick) fork (MIT).
 
 ### Fixed

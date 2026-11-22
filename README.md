@@ -33,6 +33,9 @@ pi install npm:pi-tick
 # 2. One-time CLI symlink (so you can run `pi-tick` from the terminal)
 ln -s ~/.pi/agent/tick/pi-tick.mjs ~/.local/bin/pi-tick
 chmod +x ~/.pi/agent/tick/pi-tick.mjs
+#    From a source checkout you can instead run `npm run install:cli`
+#    (scripts/install.mjs): it syncs the CLI without opening a pi session
+#    and symlinks it into ~/.local/bin (override with PI_TICK_BIN_DIR).
 
 # 3. macOS TCC pre-flight: launchd-spawned processes can't show TCC dialogs.
 #    Run any job once interactively with `/tick run <id>` to answer any
@@ -116,6 +119,21 @@ pi-tick config set default-model MiniMax-M3
 pi-tick config get default-model     # prints MiniMax-M3
 pi-tick config unset default-model   # back to step 3
 ```
+
+### Command jobs (`--agent command`)
+
+`pi-tick add <id> --agent command --prompt "<shell command line>" ...` runs the
+prompt with `/bin/sh -c` in `--cwd`, with no model. Command jobs share
+schedules, timeouts, kill, the run log and transcripts with pi jobs:
+
+- The exit code decides success.
+- The last non-empty stdout line becomes the run summary (`finalTextPreview`),
+  and the error text when the command fails with nothing on stderr.
+- `pi-tick show` prints the output verbatim.
+- `--model` is rejected.
+
+Command jobs are CLI-only: the `tick_create` tool cannot choose an agent, so a
+model cannot schedule a shell command.
 
 ### Inside a Pi session: `/tick`
 
@@ -357,6 +375,7 @@ still create-and-enable in one call by passing `enabled: true` to
 - `enabled` — boolean. **Default `false` on `add`.**
 - `model` — optional; passed to `pi` as `--model`.
 - `piPath` — internal; set by `enable` after resolving `which pi`.
+- `agent` — optional; `"command"` for command jobs. Absent means pi.
 - `lastRun` — written by the runner; `null` until first run. Carries the
   same fields as a `RunRecord` (see below) plus `transcriptPath` and
   `finalTextPreview` so a fresh `pi-tick show <id>` can render the latest

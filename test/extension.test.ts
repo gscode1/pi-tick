@@ -242,6 +242,25 @@ test("extension: tick_create for interval persists the job to the catalog", asyn
   });
 });
 
+test("extension: tick_create cannot choose an agent (command jobs are CLI-only)", async () => {
+  await withCatalog([], async (_env, dataDir) => {
+    const ext = await loadExtension();
+    const fake = makeFakePi();
+    ext.default(fake as any);
+    const tool = fake.tools.get("tick_create")! as any;
+    assert.equal(tool.parameters?.properties?.agent, undefined, "tick_create schema has no agent");
+    // Even if a caller smuggles one in, it is not forwarded.
+    const result = await tool.execute!("call1", {
+      jobId: "j-agent", prompt: "echo hi", cwd: "/tmp",
+      scheduleKind: "interval", scheduleValue: { minutes: 5, seconds: 0 },
+      agent: "command",
+    });
+    assert.notEqual(result.isError, true);
+    const job = readCatalog(dataDir).jobs.find((j) => j.id === "j-agent");
+    assert.equal(job.agent, undefined, "job runs under pi");
+  });
+});
+
 test("extension: tick_create for once persists the absolute timestamp and consumption guard", async () => {
   await withCatalog([], async (_env, dataDir) => {
     const ext = await loadExtension();
