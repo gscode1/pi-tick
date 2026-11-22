@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Docs
+- README brought up to date with 0.2.x: agent adapters, `kill`, `show --run-id`, `add` runtime-limit/`--agent`/`--on-complete` flags, `tick_create` runtime args, run `reason` values, token-limit failures on pi 1.1+, log rotation, test count.
+
 ## [0.2.1] - 2026-11-22
 
 ### Changed
