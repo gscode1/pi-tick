@@ -7,6 +7,7 @@ import { runJob, pruneLogs } from "../extensions/tick/bin/runner.mjs";
 import { runCallback, callbackLogPath } from "../extensions/tick/bin/callback.mjs";
 import { createTick } from "../extensions/tick/bin/commands/add.mjs";
 import { cleanupJobArtifacts } from "../extensions/tick/bin/catalog.mjs";
+import { waitForCallback } from "../extensions/tick/bin/commands/run.mjs";
 
 const quiet = { write() { return true; } };
 
@@ -121,4 +122,30 @@ test("on-complete: must be an absolute path", async () => {
   const { dir } = setup("v");
   const base = { prompt: "true", cwd: dir, scheduleKind: "daily", scheduleOpts: { time: "09:00" } };
   await assert.rejects(createTick({ ...base, jobId: "v1", onComplete: "notify.sh" }, { stdout: quiet }), /absolute path/);
+});
+
+test("on-complete: must exist and be executable at add time", async () => {
+  const { dir } = setup("vx");
+  const base = { prompt: "true", cwd: dir, scheduleKind: "daily", scheduleOpts: { time: "09:00" } };
+  await assert.rejects(createTick({ ...base, jobId: "vx1", onComplete: join(dir, "missing.sh") }, { stdout: quiet }), /does not exist/);
+  const noexec = join(dir, "noexec.sh");
+  writeFileSync(noexec, "#!/bin/sh\n", { mode: 0o644 });
+  await assert.rejects(createTick({ ...base, jobId: "vx2", onComplete: noexec }, { stdout: quiet }), /not executable/);
+  await assert.rejects(createTick({ ...base, jobId: "vx3", onComplete: dir }, { stdout: quiet }), /not a file/);
+  const ok = await createTick({ ...base, jobId: "vx4", onComplete: script(dir, "ok.sh", "true") }, { stdout: quiet });
+  assert.equal(ok.onComplete, join(dir, "ok.sh"));
+});
+
+test("on-complete: a manual run says it is waiting for a slow callback; scheduler runs stay quiet", async () => {
+  const slow = () => new Promise((r) => setTimeout(() => r("exit 0"), 60));
+  const out: string[] = [];
+  const stderr = { write(s: string) { out.push(s); return true; } };
+  await waitForCallback(slow(), { manual: true, stderr, noticeDelayMs: 10 });
+  assert.equal(out.length, 1);
+  assert.match(out[0], /waiting for --on-complete/);
+  out.length = 0;
+  await waitForCallback(slow(), { manual: false, stderr, noticeDelayMs: 10 });
+  await waitForCallback(Promise.resolve("exit 0"), { manual: true, stderr, noticeDelayMs: 10 });
+  await waitForCallback(null, { manual: true, stderr });
+  assert.deepEqual(out, []);
 });

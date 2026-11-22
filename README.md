@@ -91,7 +91,9 @@ pi-tick delete nightly-recap
 | `pi-tick help` | Print usage. |
 
 Flags for `add`:
-- `--prompt "..."` — required (≤ 16 KB)
+- `--prompt "..."` — required (≤ 16 KB). A prompt that itself starts with `--`
+  must use the `=` form, `--prompt='--foo bar'`; otherwise `--foo` is read as a
+  flag. Prompts starting with `-` or `@` reach pi unchanged (#41).
 - `--cwd <abs path>` — required, must exist
 - `--kind interval|daily|weekly|once` — required
 - `--minutes N --seconds N` — for `interval` (min total 5s; see "Interval support" below)
@@ -145,6 +147,9 @@ executable after every run of the job, in the job's cwd, with the run record
   block `pi-tick kill` or the next run.
 - It never changes the run's recorded outcome. It is killed with its process
   group after 30s.
+- The path must exist and be executable when the job is added.
+- `pi-tick run --manual` waits for it before exiting and, if it is still
+  running after a second, says so on stderr.
 - Its stdout/stderr go to `logs/<id>.callback.log`, which is rotated and aged
   out with the scheduler logs and removed by `pi-tick delete`.
 

@@ -10,6 +10,7 @@
 // memory.
 
 import { isAbsolute } from "node:path";
+import { statSync, accessSync, constants as fsConstants } from "node:fs";
 import { agentAdapter } from "../agents/index.mjs";
 import { ensureDataDirs, loadCatalog, saveCatalog, findJob, withCatalogLock } from "../catalog.mjs";
 import { parseFlags, flagString, flagOptionalString, flagOptionalU32 } from "../argv.mjs";
@@ -44,6 +45,19 @@ export function scheduleOptsFromScheduleValue(kind, scheduleValue) {
   return opts;
 }
 
+// The callback only runs after a job fires, so catch a typo or a missing
+// chmod +x at add time instead of in logs/<id>.callback.log hours later.
+function validateExecutable(path) {
+  let st;
+  try { st = statSync(path); } catch {
+    fail(`--on-complete: ${path} does not exist`, 2);
+  }
+  if (!st.isFile()) fail(`--on-complete: ${path} is not a file`, 2);
+  try { accessSync(path, fsConstants.X_OK); } catch {
+    fail(`--on-complete: ${path} is not executable`, 2);
+  }
+}
+
 export async function createTick(params, { stdout = process.stdout, stderr = process.stderr } = {}) {
   const id = String(params.jobId);
   validateId(id);
@@ -62,6 +76,7 @@ export async function createTick(params, { stdout = process.stdout, stderr = pro
   if (onComplete !== null && (typeof onComplete !== "string" || !isAbsolute(onComplete))) {
     fail(`--on-complete must be an absolute path to an executable`, 2);
   }
+  if (onComplete !== null) validateExecutable(onComplete);
 
   // Runtime controls arrive as plain numbers here (CLI flags are parsed by
   // the caller, the tool's params are already numbers) — reuse

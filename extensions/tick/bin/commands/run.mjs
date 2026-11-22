@@ -9,6 +9,7 @@ import { parseFlags } from "../argv.mjs";
 import { fail } from "../errors.mjs";
 import { resolveNodePath, augmentedPath } from "../bin-resolve.mjs";
 import { runJob } from "../runner.mjs";
+import { CALLBACK_TIMEOUT_MS } from "../callback.mjs";
 import { agentAdapter } from "../agents/index.mjs";
 import { getActiveRun } from "../run-registry.mjs";
 import { activeBackend } from "../backend-info.mjs";
@@ -20,6 +21,20 @@ import { activeBackend } from "../backend-info.mjs";
 // Outside [at - EARLY, at + LATE] an external trigger does not run the job.
 export const ONCE_EARLY_GRACE_MS = 60 * 1000;
 export const ONCE_LATE_GRACE_MS = 24 * 60 * 60 * 1000;
+
+// How long a manual run waits on a still-running --on-complete callback
+// before saying so, so `pi-tick run --manual` doesn't look hung for up to
+// CALLBACK_TIMEOUT_MS. Scheduler runs stay quiet (their stderr is a log file).
+export const CALLBACK_NOTICE_DELAY_MS = 1000;
+
+export async function waitForCallback(callback, { manual, stderr, noticeDelayMs = CALLBACK_NOTICE_DELAY_MS }) {
+  if (!callback) return;
+  if (!manual) { await callback; return; }
+  const timer = setTimeout(() => {
+    stderr.write(`pi-tick: run finished; waiting for --on-complete (up to ${CALLBACK_TIMEOUT_MS / 1000}s)…\n`);
+  }, noticeDelayMs);
+  try { await callback; } finally { clearTimeout(timer); }
+}
 
 // Best-effort removal of the scheduler entry; never fails the run.
 async function unregisterQuietly(id, stderr, what) {
@@ -163,7 +178,7 @@ export async function cmdRun(argv, { stdout = process.stdout, stderr = process.s
   // The process exits as soon as this returns, so let --on-complete finish
   // first (it is bounded by CALLBACK_TIMEOUT_MS). Before the one-shot
   // unregister: under launchd, bootout terminates this process.
-  await result.callback;
+  await waitForCallback(result.callback, { manual: trigger === "manual", stderr });
   if (claimedOnce) await unregisterQuietly(id, stderr, "one-shot");
   return result.exitCode;
 }
