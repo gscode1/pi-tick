@@ -242,22 +242,24 @@ test("extension: tick_create for interval persists the job to the catalog", asyn
   });
 });
 
-test("extension: tick_create cannot choose an agent (command jobs are CLI-only)", async () => {
+test("extension: tick_create cannot set an agent or on-complete hook (both CLI-only)", async () => {
   await withCatalog([], async (_env, dataDir) => {
     const ext = await loadExtension();
     const fake = makeFakePi();
     ext.default(fake as any);
     const tool = fake.tools.get("tick_create")! as any;
     assert.equal(tool.parameters?.properties?.agent, undefined, "tick_create schema has no agent");
+    assert.equal(tool.parameters?.properties?.onComplete, undefined, "tick_create schema has no onComplete");
     // Even if a caller smuggles one in, it is not forwarded.
     const result = await tool.execute!("call1", {
       jobId: "j-agent", prompt: "echo hi", cwd: "/tmp",
       scheduleKind: "interval", scheduleValue: { minutes: 5, seconds: 0 },
-      agent: "command",
+      agent: "command", onComplete: "/bin/true",
     });
     assert.notEqual(result.isError, true);
     const job = readCatalog(dataDir).jobs.find((j) => j.id === "j-agent");
     assert.equal(job.agent, undefined, "job runs under pi");
+    assert.equal(job.onComplete, undefined, "no on-complete hook");
   });
 });
 

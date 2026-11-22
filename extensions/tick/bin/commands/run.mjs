@@ -160,6 +160,10 @@ export async function cmdRun(argv, { stdout = process.stdout, stderr = process.s
   // runJob kills Pi before it starts. Correctness does not depend on this
   // succeeding: onceConsumedAt is already durable, so a stale calendar entry
   // can never run the prompt again. This is best-effort cleanup.
+  // The process exits as soon as this returns, so let --on-complete finish
+  // first (it is bounded by CALLBACK_TIMEOUT_MS). Before the one-shot
+  // unregister: under launchd, bootout terminates this process.
+  await result.callback;
   if (claimedOnce) await unregisterQuietly(id, stderr, "one-shot");
   return result.exitCode;
 }

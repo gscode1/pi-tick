@@ -135,6 +135,21 @@ schedules, timeouts, kill, the run log and transcripts with pi jobs:
 Command jobs are CLI-only: the `tick_create` tool cannot choose an agent, so a
 model cannot schedule a shell command.
 
+### Completion hook (`--on-complete`)
+
+`pi-tick add <id> --on-complete /abs/path/to/executable ...` runs that
+executable after every run of the job, in the job's cwd, with the run record
+(the `runs.jsonl` line) as JSON on stdin.
+
+- It starts after the run is recorded and no longer active, so it cannot
+  block `pi-tick kill` or the next run.
+- It never changes the run's recorded outcome. It is killed with its process
+  group after 30s.
+- Its stdout/stderr go to `logs/<id>.callback.log`, which is rotated and aged
+  out with the scheduler logs and removed by `pi-tick delete`.
+
+Like command jobs, it is CLI-only: `tick_create` has no field for it.
+
 ### Inside a Pi session: `/tick`
 
 | Command | Purpose |
@@ -376,6 +391,7 @@ still create-and-enable in one call by passing `enabled: true` to
 - `model` — optional; passed to `pi` as `--model`.
 - `piPath` — internal; set by `enable` after resolving `which pi`.
 - `agent` — optional; `"command"` for command jobs. Absent means pi.
+- `onComplete` — optional; absolute path of the `--on-complete` executable.
 - `lastRun` — written by the runner; `null` until first run. Carries the
   same fields as a `RunRecord` (see below) plus `transcriptPath` and
   `finalTextPreview` so a fresh `pi-tick show <id>` can render the latest
