@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Internal: pi invocation (argv plan and RPC/JSON event lifecycle) moved from `runner.mjs` into an agent adapter, `bin/agents/pi.mjs`, behind `agentAdapter()` in `bin/agents/index.mjs`. No behaviour change. Adapter layout adapted from the [samwei12/pi-tick](https://github.com/samwei12/pi-tick) fork (MIT).
+
 ### Fixed
 - Prompts starting with `-` or `@` (e.g. `-x foo`, `--help`, `@file`) are now delivered to pi as the message instead of being parsed as options or file arguments (#41).
 
