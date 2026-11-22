@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `pi-tick doctor [id] [--fix] [--json]` finds enabled jobs that silently stopped firing: a missing, unloaded or changed launchd/cron entry, a baked node, CLI, pi, `cwd` or `--on-complete` path that no longer exists (e.g. after an nvm or mise node upgrade), a missed expected fire, or a failing last run. `--fix` re-registers the repairable ones with freshly resolved paths. Also `/tick doctor` (#61).
+- `pi-tick list` shows `stale` or `overdue` for enabled jobs doctor would flag.
+- On `session_start`, the extension shows one notice when tick jobs need attention.
+- `enable` records what it registered (`registration` in `jobs.json`), and both backends gain a read-only `status(id)`.
+
 ### Docs
 - README brought up to date with 0.2.x: agent adapters, `kill`, `show --run-id`, `add` runtime-limit/`--agent`/`--on-complete` flags, `tick_create` runtime args, run `reason` values, token-limit failures on pi 1.1+, log rotation, test count.
 

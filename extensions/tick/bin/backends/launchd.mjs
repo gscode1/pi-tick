@@ -14,7 +14,9 @@ import {
   renameSync,
   chmodSync,
   readdirSync,
+  readFileSync,
 } from "node:fs";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
@@ -145,6 +147,25 @@ ${envBlock}${scheduleKeys}</dict>
 `;
 }
 
+export function fingerprint(text) {
+  return createHash("sha256").update(text).digest("hex").slice(0, 16);
+}
+
+function xmlUnescape(s) {
+  return s.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, "&");
+}
+
+// Paths baked into a rendered plist: node, CLI, and WorkingDirectory.
+export function parsePlistPaths(plist) {
+  const args = plist.match(/<key>ProgramArguments<\/key>\s*<array>\s*<string>([^<]*)<\/string>\s*<string>([^<]*)<\/string>/);
+  const cwd = plist.match(/<key>WorkingDirectory<\/key>\s*<string>([^<]*)<\/string>/);
+  return {
+    nodePath: args ? xmlUnescape(args[1]) : null,
+    cliPath: args ? xmlUnescape(args[2]) : null,
+    cwd: cwd ? xmlUnescape(cwd[1]) : null,
+  };
+}
+
 function runLaunchctl(args) {
   // Test override: PI_TICK_LAUNCHCTL points to a stub binary.
   const bin = process.env.PI_TICK_LAUNCHCTL || "launchctl";
@@ -216,6 +237,7 @@ export const launchdBackend = {
     });
     mkdirSync(plistDir(), { recursive: true });
     writeFileSync(plistPath(job.id), plist, { encoding: "utf8" });
+    const registeredFingerprint = fingerprint(plist);
     chmodSync(plistPath(job.id), 0o644);
 
     // Idempotent re-registration: always bootout first, ignore errors.
@@ -225,7 +247,20 @@ export const launchdBackend = {
       try { unlinkSync(plistPath(job.id)); } catch { /* already gone */ }
       return { ok: false, error: `launchctl bootstrap failed: ${boot.stderr.trim() || "unknown error"}` };
     }
-    return { ok: true, referencePath: plistPath(job.id) };
+    return { ok: true, referencePath: plistPath(job.id), fingerprint: registeredFingerprint };
+  },
+  // Read-only, and synchronous (unlike the rest of the port) so `list` can
+  // stay synchronous. `loaded` is null when launchctl itself can't be run.
+  status: (jobId) => {
+    let plist;
+    try {
+      plist = readFileSync(plistPath(jobId), "utf8");
+    } catch {
+      return { registered: false, loaded: null, fingerprint: null, paths: null };
+    }
+    const res = runLaunchctl(["print", `gui/${userUid()}/${LABEL_PREFIX}${jobId}`]);
+    const loaded = res.error ? null : res.status === 0;
+    return { registered: true, loaded, fingerprint: fingerprint(plist), paths: parsePlistPaths(plist) };
   },
   unregister: async (jobId) => {
     // Rename to .disabled for inspection. Do this before bootout: when a

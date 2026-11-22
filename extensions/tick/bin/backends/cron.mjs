@@ -25,6 +25,7 @@ import {
   readFileSync,
   writeFileSync,
 } from "node:fs";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 
 import { logsDir as defaultLogsDir } from "../paths.mjs";
@@ -115,6 +116,22 @@ function quote(s) {
   // the command). `\%` is a literal `%` to cron. The two replaces act
   // on disjoint character sets and commute; order is for clarity only.
   return `'${String(s).replace(/%/g, '\\%').replace(/'/g, `'\\''`)}'`;
+}
+
+export function fingerprint(text) {
+  return createHash("sha256").update(text).digest("hex").slice(0, 16);
+}
+
+// The first two single-quoted words of a cron command (node, CLI), undoing
+// quote()'s escaping. Returns nulls for a hand-edited line we can't parse.
+export function parseCronPaths(line) {
+  const words = [];
+  const re = /'((?:[^']|'\\'')*)'/g;
+  let m;
+  while (words.length < 2 && (m = re.exec(line))) {
+    words.push(m[1].replace(/'\\''/g, "'").replace(/\\%/g, "%"));
+  }
+  return { nodePath: words[0] ?? null, cliPath: words[1] ?? null, cwd: null };
 }
 
 function readCrontab() {
@@ -221,7 +238,20 @@ export const cronBackend = {
     mkdirSync(logsPath, { recursive: true, mode: 0o700 });
     const w = await writeCrontab(updated);
     if (!w.ok) return { ok: false, error: w.error };
-    return { ok: true, referencePath: `crontab (entry: ${built.line.slice(0, 60)}...)` };
+    return { ok: true, referencePath: `crontab (entry: ${built.line.slice(0, 60)}...)`, fingerprint: fingerprint(built.line) };
+  },
+  // Read-only, and synchronous (unlike the rest of the port) so `list` can
+  // stay synchronous. cron has no separate "loaded" state.
+  status: (jobId) => {
+    const text = readCrontab();
+    if (text === null) return { registered: false, loaded: null, fingerprint: null, paths: null, error: "failed to read crontab" };
+    const lines = text.split("\n");
+    const i = lines.indexOf(`${COMMENT_PREFIX}${jobId}`);
+    if (i < 0 || i + 1 >= lines.length || !isOurCommand(lines[i + 1], jobId)) {
+      return { registered: false, loaded: null, fingerprint: null, paths: null };
+    }
+    const line = lines[i + 1];
+    return { registered: true, loaded: true, fingerprint: fingerprint(line), paths: parseCronPaths(line) };
   },
   unregister: async (jobId) => {
     const current = readCrontab();

@@ -6,6 +6,14 @@ import { fail } from "../errors.mjs";
 import { getActiveRun } from "../run-registry.mjs";
 import { formatLocal, durationSeconds } from "../format.mjs";
 import { formatSchedule, formatNextFire, printTable } from "../display.mjs";
+import { diagnoseJob } from "./doctor.mjs";
+
+// "stale" (scheduler entry or a baked path is broken) or "overdue" (missed
+// its last expected fire) when `pi-tick doctor` would flag the job.
+function enabledStatus(job) {
+  const { status } = diagnoseJob(job, { running: false });
+  return status === "stale" || status === "overdue" ? status : "scheduled";
+}
 
 export function cmdList(argv, { stdout = process.stdout, stderr = process.stderr } = {}) {
   const flags = parseFlags(argv);
@@ -34,7 +42,7 @@ export function cmdList(argv, { stdout = process.stdout, stderr = process.stderr
   const rows = catalog.jobs.map((j) => {
     const active = getActiveRun(j.id);
     const enabled = j.enabled ? "yes" : "no";
-    const status = active ? "running" : (j.enabled ? "scheduled" : (j.onceMissedAt ? "missed" : "disabled"));
+    const status = active ? "running" : (j.enabled ? enabledStatus(j) : (j.onceMissedAt ? "missed" : "disabled"));
     const sched = formatSchedule(j.schedule);
     const next = j.enabled ? formatLocal(formatNextFire(j.schedule)) : "--";
     const lastFinished = active ? "--" : (j.lastRun ? formatLocal(j.lastRun.finishedAt) : "never");

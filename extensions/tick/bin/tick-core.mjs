@@ -24,6 +24,7 @@ import { cmdKill } from "./commands/kill.mjs";
 import { cmdLog } from "./commands/log.mjs";
 import { cmdTranscripts } from "./commands/transcripts.mjs";
 import { cmdShow } from "./commands/show.mjs";
+import { cmdDoctor } from "./commands/doctor.mjs";
 
 // name → handler, plus any aliases. Each handler is `(argv, io) => exitCode`.
 const COMMANDS = {
@@ -41,6 +42,7 @@ const COMMANDS = {
   transcripts: cmdTranscripts,
   show: cmdShow,
   config: cmdConfig,
+  doctor: cmdDoctor,
 };
 
 async function dispatch(argv, { stdout, stderr }) {

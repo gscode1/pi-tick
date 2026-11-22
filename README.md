@@ -80,7 +80,7 @@ pi-tick delete nightly-recap
 | Command | Purpose |
 |---|---|
 | `pi-tick add <id> ...` | Create a job in the catalog. **Disabled by default** — pass `--enabled` to also register a launchd plist. |
-| `pi-tick list [--json]` | Print all jobs as a table (or JSON). |
+| `pi-tick list [--json]` | Print all jobs as a table (or JSON). An enabled job shows `stale` or `overdue` instead of `scheduled` when `doctor` would flag it. |
 | `pi-tick delete <id>` | Remove a job (also unloads its plist if enabled). |
 | `pi-tick enable <id>` | Register / re-register the launchd plist. Idempotent. |
 | `pi-tick disable <id>` | Unload the plist and rename it to `.plist.disabled`. |
@@ -90,6 +90,7 @@ pi-tick delete nightly-recap
 | `pi-tick transcripts <id> [--limit N]` | List transcript files for a job, newest first. |
 | `pi-tick show <id> [--run N\|--run-id <id>] [--tail M] [--raw] [--no-meta]` | Chat-style view of a transcript (default: latest). `--run N` picks the Nth most recent; `--run-id` picks a run shown by `pi-tick log`. `--tail M` keeps the last M assistant turns. `--raw` emits JSONL events, one per line (`event:` prefix for `jq` pipelines). `--no-meta` skips the run header. |
 | `pi-tick config <set\|get\|unset> <key> [value]` | Read or write tick-scoped config. Today: `default-model` (see below). |
+| `pi-tick doctor [id] [--fix] [--json]` | Find enabled jobs that silently stopped firing (see below). Exits 1 when any job needs attention. |
 | `pi-tick help` | Print usage. |
 
 Flags for `add`:
@@ -176,6 +177,24 @@ executable after every run of the job, in the job's cwd, with the run record
 
 Like command jobs, it is CLI-only: `tick_create` has no field for it.
 
+### Silent-stop detection (`doctor`)
+
+`enable` bakes absolute paths into the scheduler entry, so a node upgrade via
+nvm or mise, a moved repo, or a hand-edited plist/crontab can stop a job
+without any error. `pi-tick doctor` checks every enabled job (or one `id`):
+
+| Status | Meaning |
+|---|---|
+| `stale` | The launchd/cron entry is missing, not loaded, differs from what `enable` registered, or a baked path is gone: node, the stable CLI, pi, `cwd`, `--on-complete`. |
+| `overdue` | The last run started before the previous expected fire. Calendar jobs get 10 minutes of grace; interval jobs tolerate one missed fire; plain launchd `StartInterval` jobs (no fixed phase) are overdue after two intervals plus 5 minutes. cron does not catch up after sleep, so a fire missed while asleep shows as `overdue`. |
+| `failing` | The last run failed. |
+
+`--fix` re-runs `enable` for jobs a fresh registration can repair (missing,
+unloaded or changed entry, missing node or pi): it re-resolves node and pi
+and rewrites the entry. Missing `cwd` or `--on-complete` must be fixed by
+hand. On `session_start` the extension shows one notice when any job needs
+attention.
+
 ### Inside a Pi session: `/tick`
 
 | Command | Purpose |
@@ -188,6 +207,7 @@ Like command jobs, it is CLI-only: `tick_create` has no field for it.
 | `/tick delete <id>` | Delete a job. |
 | `/tick log [id]` | List recent runs. |
 | `/tick show <id>` | Chat-style view of a job's latest transcript. |
+| `/tick doctor [id]` | Check enabled jobs for silent stops (see above). |
 
 Argument completion works for all of these.
 
@@ -424,6 +444,11 @@ when larger than 50 MB. Override with `PI_TICK_LOG_RETENTION_DAYS` and
 - `enabled` — boolean. **Default `false` on `add`.**
 - `model` — optional; passed to `pi` as `--model`.
 - `piPath` — internal; set by `enable` after resolving `which pi`.
+- `nodePath` — internal; the node binary `enable` baked into the entry.
+- `registration` — internal; `{ backend, fingerprint, registeredAt }` written
+  by `enable`. `fingerprint` hashes the rendered plist or cron line so
+  `doctor` can detect an entry that changed since. Jobs enabled before
+  `doctor` existed have none; re-enable them to record one.
 - `agent` — optional; `"command"` for command jobs. Absent means pi.
 - `onComplete` — optional; absolute path of the `--on-complete` executable.
 - `timeoutMs`, `idleTimeoutMs`, `maxOutputBytes`, `killGraceMs` — runtime
@@ -538,7 +563,7 @@ Tests use Node's built-in `node:test` runner and run against pi 1.6
 The launchctl and `pi` calls are stubbed via PATH overrides; the test
 suite does not touch the user's real data dir or LaunchAgents.
 
-The current suite has **430 tests** across the CLI, catalog, extension,
+The current suite has **453 tests** across the CLI, catalog, extension,
 backends, runner, and transcript behavior (the macOS-only launchd smoke test
 is run separately via `npm run test:macos`).
 
