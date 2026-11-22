@@ -164,6 +164,15 @@ function taskflowPrompt(prompt) {
   return `Call the taskflow tool exactly once with ${JSON.stringify({ action: "run", name, args })}. Do not call any other tool. Do not inspect files. Return only the taskflow result.`;
 }
 
+// pi's CLI parser has no `--` end-of-options marker: a positional argument
+// starting with `-` is read as an (unknown) option and one starting with `@`
+// as a file to attach (issue #41). A single leading space makes pi take the
+// token as the message; pi passes argv messages through untrimmed, and a
+// leading space is harmless to the model.
+export function protectPromptArg(prompt) {
+  return /^[-@]/.test(prompt) ? ` ${prompt}` : prompt;
+}
+
 // ─── Phase: spawn plan ──────────────────────────────────────────────────
 // Pure: which pi invocation mode a job runs under and the argv that follow
 // from it. Slash-command jobs run via pi's RPC mode; everything else
@@ -177,7 +186,7 @@ function buildRunArgs(job, { defaultModel }) {
   const effectiveModel = job.model ?? defaultModel ?? null;
   if (effectiveModel) args.push("--model", effectiveModel);
   if (tfPrompt) args.push("--tools", "taskflow");
-  if (!isSlashCommand) args.push(tfPrompt || job.prompt);
+  if (!isSlashCommand) args.push(protectPromptArg(tfPrompt || job.prompt));
   return { isSlashCommand, args, effectiveModel };
 }
 

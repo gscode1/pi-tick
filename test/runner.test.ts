@@ -484,3 +484,51 @@ test("runJob: a child 'error' after spawn is not recorded as spawn_error", async
   assert.equal(res.exitCode, 0);
   assert.equal(res.reason, "exit_code");
 });
+
+// Mimics how pi 0.79.5 (dist/cli/args.js) classifies the tokens pi-tick
+// passes: no `--` marker; `@x` is a file arg; `--x` is an unknown flag that
+// swallows a following non-option token; `-x` is an error; anything else is
+// a message. `-p` takes the next token as a message only if it does not
+// start with `@` or `-` (except `---`).
+function piParseStub(argv) {
+  const r = { messages: [], fileArgs: [], unknownFlags: [], errors: [] };
+  const known = new Set(["--mode", "--model", "--tools"]);
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    const next = argv[i + 1];
+    if (known.has(a)) { i++; continue; }
+    if (a === "--no-session") continue;
+    if (a === "-p") {
+      if (next !== undefined && !next.startsWith("@") && (!next.startsWith("-") || next.startsWith("---"))) { r.messages.push(next); i++; }
+      continue;
+    }
+    if (a.startsWith("@")) r.fileArgs.push(a.slice(1));
+    else if (a.startsWith("--")) {
+      r.unknownFlags.push(a);
+      if (!a.includes("=") && next !== undefined && !next.startsWith("-") && !next.startsWith("@")) i++;
+    } else if (a.startsWith("-")) r.errors.push(`Unknown option: ${a}`);
+    else r.messages.push(a);
+  }
+  return r;
+}
+
+for (const prompt of ["-x foo", "--help", "@file", "---", "-", "@", "plain prompt", " -already spaced"]) {
+  test(`runJob delivers prompt ${JSON.stringify(prompt)} to pi as the message (issue #41)`, async () => {
+    let argv;
+    await runJob({ ...defaultJob, prompt }, "manual", {
+      ...getDefaultOptions(),
+      spawnFn: (_bin, args) => {
+        argv = args;
+        const child = createMockChild();
+        setTimeout(() => child.emit("close", 0, null), 5);
+        return child;
+      },
+    });
+    const parsed = piParseStub(argv);
+    assert.deepEqual(parsed.errors, []);
+    assert.deepEqual(parsed.fileArgs, []);
+    assert.deepEqual(parsed.unknownFlags, []);
+    assert.equal(parsed.messages.length, 1);
+    assert.equal(parsed.messages[0].trim(), prompt.trim());
+  });
+}
