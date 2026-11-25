@@ -1,4 +1,5 @@
-// commands/log.mjs — `pi-tick log [id] [--limit N] [--failed] [--since <dur>]`.
+// commands/log.mjs — `pi-tick log [id] [--limit N] [--failed] [--since <dur>] [--all]`.
+// `skipped` runs (a --when guard that found nothing to do) are hidden unless --all.
 
 import { existsSync } from "node:fs";
 import { runsFile } from "../paths.mjs";
@@ -27,6 +28,7 @@ export function cmdLog(argv, { stdout = process.stdout, stderr = process.stderr 
   const limit = flags.limit === undefined || flags.limit === true ? 10 : Number(flags.limit);
   if (!Number.isInteger(limit) || limit < 0) fail(`--limit must be a non-negative integer (got '${flags.limit}')`, 2);
   const onlyFailed = flags.failed === true || flags.failed === "true";
+  const showSkipped = flags.all === true || flags.all === "true";
   let sinceMs = null;
   if (flags.since !== undefined) {
     sinceMs = parseSinceDuration(String(flags.since));
@@ -43,11 +45,13 @@ export function cmdLog(argv, { stdout = process.stdout, stderr = process.stderr 
   // Over-fetch so post-filters still have enough to fill --limit.
   // With an id or --failed filter the matches can be arbitrarily far back, so
   // scan the whole history (current + rotated file).
-  const overFetch = id !== null || onlyFailed || limit === 0
+  // Skipped rows are filtered out, so without --all they can bury the rest.
+  const overFetch = id !== null || onlyFailed || limit === 0 || !showSkipped
     ? Infinity
     : Math.max(limit * 5 + 1000, (sinceMs != null ? 5000 : 0));
   const all = tailRunLines(overFetch);
   const records = [];
+  const skippedAt = []; // startedAt of skipped rows hidden by default
   for (const line of all) {
     if (!line.trim()) continue;
     try {
@@ -58,6 +62,7 @@ export function cmdLog(argv, { stdout = process.stdout, stderr = process.stderr 
         const t = new Date(rec.startedAt).getTime();
         if (!Number.isFinite(t) || t < Date.now() - sinceMs) continue;
       }
+      if (rec.reason === "skipped" && !showSkipped) { skippedAt.push(String(rec.startedAt)); continue; }
       records.push(rec);
     } catch (err) {
       stderr.write(`pi-tick: warning: skipping malformed run line: ${err.message}\n`);
@@ -67,6 +72,10 @@ export function cmdLog(argv, { stdout = process.stdout, stderr = process.stderr 
   // --limit 0 means all (documented in the README).
   const tail = limit === 0 ? records : records.slice(-limit);
 
+  // Hint at hidden skipped rows within the span shown (all of them if none shown).
+  const spanStart = tail.length > 0 ? String(tail[0].startedAt) : "";
+  const hiddenSkipped = skippedAt.filter((t) => t >= spanStart).length;
+
   if (tail.length === 0) {
     // Distinguish "no runs at all" from "no runs match filters" so the
     // user knows whether to drop a flag or look elsewhere.
@@ -75,6 +84,8 @@ export function cmdLog(argv, { stdout = process.stdout, stderr = process.stderr 
     if (sinceMs != null) filterDesc.push(`--since ${flags.since}`);
     if (filterDesc.length > 0) {
       stdout.write(`(no runs match ${filterDesc.join(" ")})\n`);
+    } else if (hiddenSkipped > 0) {
+      stdout.write(`(no runs yet besides ${hiddenSkipped} skipped; use --all to show them)\n`);
     } else if (id) {
       stdout.write(`(no runs for job '${id}')\n`);
     } else {
@@ -93,8 +104,9 @@ export function cmdLog(argv, { stdout = process.stdout, stderr = process.stderr 
     String(r.exitCode),
     r.tokens ? `${r.tokens.input}/${r.tokens.output}` : "",
     r.transcriptPath || "",
-    r.error || "",
+    r.error || (r.reason === "skipped" ? "skipped" : ""),
   ]);
   printTable([headers, ...rows], { stdout });
+  if (hiddenSkipped > 0) stdout.write(`(${hiddenSkipped} skipped run(s) hidden; use --all to show them)\n`);
   return 0;
 }

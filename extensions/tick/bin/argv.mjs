@@ -12,6 +12,8 @@ export const BOOLEAN_FLAGS = new Set([
   "enabled", // add
   "manual", // run
   "failed", // log
+  "all", // log
+  "no-when", // run
   "json", // list
   "raw", // show
   "fix", // doctor

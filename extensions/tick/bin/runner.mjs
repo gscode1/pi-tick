@@ -16,6 +16,7 @@ import { transcriptStartMs } from "./format.mjs";
 import { agentAdapter } from "./agents/index.mjs";
 import { isTaskflowPrompt } from "./agents/pi.mjs";
 import { runCallback } from "./callback.mjs";
+import { runGuard, substituteWhenStdout } from "./guard.mjs";
 
 export const TRANSCRIPT_RETENTION_DAYS = 7;
 export const TRANSCRIPT_MAX_BYTES_PER_JOB = 500 * 1024 * 1024;
@@ -359,17 +360,23 @@ async function updateLastRunAndPrune(jobId, record, { transcriptPath, finishedAt
       const cat = loadCatalog();
       j = findJob(cat, jobId);
       if (j) {
-        j.lastRun = {
-          startedAt: record.startedAt,
-          finishedAt: record.finishedAt,
-          exitCode: record.exitCode,
-          reason: record.reason,
-          error: record.error,
-        };
-        if (transcriptPath) j.lastRun.transcriptPath = transcriptPath;
-        if (record.tokens) j.lastRun.tokens = record.tokens;
-        if (record.agent) j.lastRun.agent = record.agent;
-        if (record.finalTextPreview) j.lastRun.finalTextPreview = record.finalTextPreview;
+        if (record.reason === "skipped") {
+          // A guard skip is a fire, but must not replace lastRun: it would
+          // mask a previous failure. doctor/list read lastSkippedAt too.
+          j.lastSkippedAt = record.startedAt;
+        } else {
+          j.lastRun = {
+            startedAt: record.startedAt,
+            finishedAt: record.finishedAt,
+            exitCode: record.exitCode,
+            reason: record.reason,
+            error: record.error,
+          };
+          if (transcriptPath) j.lastRun.transcriptPath = transcriptPath;
+          if (record.tokens) j.lastRun.tokens = record.tokens;
+          if (record.agent) j.lastRun.agent = record.agent;
+          if (record.finalTextPreview) j.lastRun.finalTextPreview = record.finalTextPreview;
+        }
         j.updatedAt = finishedAt;
 
         const nowMs = Date.now();
@@ -397,18 +404,114 @@ async function updateLastRunAndPrune(jobId, record, { transcriptPath, finishedAt
   }
 }
 
+// ─── Phase: guard (`--when`) ────────────────────────────────────────────
+// Runs the job's guard before anything else. Resolves to
+//   { run: true, stdout }                     the agent should run, or
+//   { run: false, result }                    `skipped` / `guard_failed` was
+//                                             recorded; `result` is runJob's.
+// While the guard runs the job has an active-run record (its child is the
+// guard), so an overlapping tick is refused and `pi-tick kill` reaches it.
+async function runGuardPhase(job, { runId, startedAt, triggerKind, env, agent, options }) {
+  const { transcriptsDir, logsDir, stderr = process.stderr, guardSpawnFn } = options;
+  let guardChild = null;
+  let terminated = false;
+  let markFinished;
+  const finished = new Promise((r) => { markFinished = r; });
+  const handle = {
+    terminate: () => {
+      terminated = true;
+      if (guardChild && Number.isInteger(guardChild.pid)) {
+        try { process.kill(-guardChild.pid, "SIGKILL"); } catch { /* already gone */ }
+      }
+    },
+    finished,
+  };
+  liveRuns.add(handle);
+  syncSignalHandlers();
+  try {
+    const guard = await runGuard(job, {
+      env,
+      spawnFn: guardSpawnFn ?? spawn,
+      onSpawn: (child) => {
+        guardChild = child;
+        if (!Number.isInteger(child.pid)) return;
+        try {
+          writeActiveRun(job.id, {
+            jobId: job.id, runId, startedAt, pid: process.pid, childPid: child.pid,
+            pidStart: processStart(process.pid), childStart: processStart(child.pid),
+          });
+        } catch { /* best effort */ }
+      },
+    });
+    if (guard.outcome === "pass") return { run: true, stdout: guard.stdout };
+
+    const killed = readKillRequest(job.id, runId) !== null;
+    const finishedAt = new Date().toISOString();
+    const skipped = guard.outcome === "skip";
+    const record = {
+      runId, jobId: job.id, triggerKind, startedAt, finishedAt,
+      exitCode: skipped ? 0 : 1,
+      reason: skipped ? "skipped" : "guard_failed",
+      error: skipped ? null : (terminated ? "guard terminated" : killed ? "guard killed" : guard.error),
+      model: null,
+    };
+    if (agent !== "pi") record.agent = agent;
+    try { appendJsonl(runsFile(), record); } catch { /* best effort */ }
+    try { ensureFileMode(runsFile(), 0o600); } catch { /* best effort */ }
+    clearActiveRun(job.id, runId);
+    await updateLastRunAndPrune(job.id, record, { transcriptPath: null, finishedAt, transcriptsDir, logsDir, stderr });
+    return {
+      run: false,
+      result: withCallback({
+        exitCode: record.exitCode, reason: record.reason, error: record.error,
+        startedAt, finishedAt, runId, transcriptPath: null, transcriptBytes: null,
+        tokens: undefined, finalTextPreview: undefined,
+      }, Promise.resolve(null)),
+    };
+  } finally {
+    // Idempotent: also covers the pass path, where the agent's own active
+    // record (same runId) replaces this one.
+    clearActiveRun(job.id, runId);
+    liveRuns.delete(handle);
+    syncSignalHandlers();
+    markFinished();
+  }
+}
+
 export async function runJob(job, trigger, options) {
   const { piPath, transcriptsDir, logsDir, spawnFn = spawn, stderr = process.stderr, envPath, defaultModel } = options;
   const drainMs = Number.isFinite(options.drainMs) ? options.drainMs : STREAM_DRAIN_MS;
 
   const adapter = agentAdapter(job.agent);
-  const { isSlashCommand, args, effectiveModel } = adapter.plan(job, { defaultModel });
+  const startedAt = new Date().toISOString();
+  const runId = randomBytes(4).toString("hex");
+  const triggerKind = trigger || "external";
+
+  // PWD matches cwd so shells and tools that trust $PWD see the job's directory.
+  const env = { ...process.env, PWD: job.cwd, CONTEXT_MODE_BRIDGE_DEPTH: process.env.CONTEXT_MODE_BRIDGE_DEPTH || "1" };
+  if (envPath) env.PATH = envPath;
+  delete env.PI_TICK_WHEN_STDOUT;
+
+  // --when guard (skipped by `run --manual --no-when`): exit 0 runs the
+  // agent with the guard's stdout; anything else ends the run here, before a
+  // transcript is opened or an agent is spawned.
+  let whenStdout = null;
+  if (job.when && !options.skipGuard) {
+    const phase = await runGuardPhase(job, { runId, startedAt, triggerKind, env, agent: adapter.id, options });
+    if (!phase.run) return phase.result;
+    whenStdout = phase.stdout;
+  }
+  if (whenStdout !== null) env.PI_TICK_WHEN_STDOUT = whenStdout;
+  // pi prompts get {{when.stdout}} filled in (empty without a guard). Command
+  // jobs run the prompt as shell text, so there it is only in the env var.
+  // The run mode (slash command / taskflow) is classified from the original
+  // job.prompt; the substituted text is only what gets sent.
+  const promptText = adapter.id === "pi" ? substituteWhenStdout(job.prompt, whenStdout ?? "") : job.prompt;
+
+  const { isSlashCommand, args, effectiveModel } = adapter.plan(job, { defaultModel, promptText });
   const isTaskflow = adapter.id === "pi" && isTaskflowPrompt(job.prompt);
   // piPath is the pi binary; other adapters name their own executable.
   const executable = adapter.id === "pi" ? piPath : adapter.resolve(job);
-
-  const startedAt = new Date().toISOString();
-  const runId = randomBytes(4).toString("hex");
 
   let transcriptStream = null;
   let transcriptPath = null;
@@ -426,12 +529,6 @@ export async function runJob(job, trigger, options) {
     transcriptWriteError = err;
     stderr.write(`pi-tick: cannot open transcript ${transcriptPath || "(unknown)"}: ${err.message}\n`);
   }
-
-  const triggerKind = trigger || "external";
-
-  // PWD matches cwd so shells and tools that trust $PWD see the job's directory.
-  const env = { ...process.env, PWD: job.cwd, CONTEXT_MODE_BRIDGE_DEPTH: process.env.CONTEXT_MODE_BRIDGE_DEPTH || "1" };
-  if (envPath) env.PATH = envPath;
 
   let child;
   try {
@@ -461,7 +558,7 @@ export async function runJob(job, trigger, options) {
     });
     return withCallback(
       { ...record, transcriptPath: existingTranscriptPath, transcriptBytes: existingTranscriptPath ? 0 : null },
-      runCallback(job, record, { logsDir, stderr }),
+      runCallback(job, record, { logsDir, stderr, whenStdout }),
     );
   }
 
@@ -493,7 +590,7 @@ export async function runJob(job, trigger, options) {
   const rpc = adapter.lifecycle({ isSlashCommand, child });
   // Keep RPC stdin open until the assistant turn finishes (see
   // createRpcLifecycle in agents/pi.mjs for why).
-  rpc.writePrompt(job.prompt);
+  rpc.writePrompt(promptText);
 
   // Issue #48 — trigger is always passed explicitly by callers now (cmdRun
   // reads --manual, not process.env). "external" only covers direct
@@ -658,7 +755,7 @@ export async function runJob(job, trigger, options) {
         transcriptBytes,
         tokens: record.tokens,
         finalTextPreview: record.finalTextPreview,
-      }, runCallback(job, record, { logsDir, stderr })));
+      }, runCallback(job, record, { logsDir, stderr, whenStdout })));
     };
 
     child.on("error", (err) => {

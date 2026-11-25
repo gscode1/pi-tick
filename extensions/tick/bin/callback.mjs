@@ -5,7 +5,8 @@
 // <logsDir>/<jobId>.callback.log, which pruneLogs ages out and rotates like
 // the scheduler logs. A callback never retries the job or changes its
 // recorded outcome; it is killed (with its process group) after
-// CALLBACK_TIMEOUT_MS.
+// CALLBACK_TIMEOUT_MS. When the job has a `--when` guard that passed, its
+// stdout is in the callback's environment as PI_TICK_WHEN_STDOUT.
 //
 // CLI-only (`pi-tick add --on-complete`): the tick_create tool has no field
 // for it, so a model cannot make pi-tick run an arbitrary executable.
@@ -21,7 +22,7 @@ export function callbackLogPath(logsDir, jobId) {
 
 // Resolves once the callback has exited, failed to start, or timed out.
 // Never rejects.
-export function runCallback(job, record, { logsDir, stderr = process.stderr, timeoutMs = CALLBACK_TIMEOUT_MS, spawnFn = spawn } = {}) {
+export function runCallback(job, record, { logsDir, stderr = process.stderr, timeoutMs = CALLBACK_TIMEOUT_MS, spawnFn = spawn, whenStdout = null } = {}) {
   if (!job.onComplete || !logsDir) return Promise.resolve(null);
   const logPath = callbackLogPath(logsDir, job.id);
   let fd;
@@ -38,7 +39,10 @@ export function runCallback(job, record, { logsDir, stderr = process.stderr, tim
   return new Promise((resolve) => {
     let child;
     try {
-      child = spawnFn(job.onComplete, [], { cwd: job.cwd, detached: true, stdio: ["pipe", fd, fd] });
+      const env = { ...process.env };
+      delete env.PI_TICK_WHEN_STDOUT;
+      if (whenStdout !== null) env.PI_TICK_WHEN_STDOUT = whenStdout;
+      child = spawnFn(job.onComplete, [], { cwd: job.cwd, env, detached: true, stdio: ["pipe", fd, fd] });
     } catch (err) {
       try { writeSync(fd, `on-complete: ${err.message}\n`); } catch { /* ignore */ }
       closeSync(fd);

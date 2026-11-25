@@ -15,7 +15,7 @@ import { ensureDataDirs, loadCatalog, saveCatalog, findJob, findJobIgnoreCase, w
 import { parseFlags, flagString, flagOptionalString, flagOptionalU32 } from "../argv.mjs";
 import { fail } from "../errors.mjs";
 import { PiTickError } from "../catalog.mjs";
-import { validateId, validatePrompt, validateCwd, validateExecutable } from "../validate.mjs";
+import { validateId, validatePrompt, validateCwd, validateExecutable, validateWhen, parseWhenTimeout } from "../validate.mjs";
 import { buildSchedule, KIND_INTERVAL, KIND_DAILY, KIND_WEEKLY, KIND_ONCE } from "../schedule.mjs";
 import { cmdEnableInternal } from "./enable.mjs";
 
@@ -75,6 +75,10 @@ export async function createTick(params, { stdout = process.stdout, stderr = pro
     fail(`--on-complete must be an absolute path to an executable`, 2);
   }
   if (onComplete !== null) validateExecutable(onComplete);
+  const when = params.when == null ? null : params.when;
+  if (when !== null) validateWhen(when);
+  if (params.whenTimeout != null && when === null) fail(`--when-timeout requires --when`, 2);
+  const whenTimeout = params.whenTimeout == null ? null : parseWhenTimeout(params.whenTimeout);
 
   // Runtime controls arrive as plain numbers here (CLI flags are parsed by
   // the caller, the tool's params are already numbers) — reuse
@@ -111,6 +115,8 @@ export async function createTick(params, { stdout = process.stdout, stderr = pro
     model,
     ...(agent !== "pi" ? { agent } : {}),
     ...(onComplete ? { onComplete } : {}),
+    ...(when !== null ? { when } : {}),
+    ...(whenTimeout !== null ? { whenTimeout } : {}),
     piPath: null,
     nodePath: null,
     createdAt: now,
@@ -186,6 +192,9 @@ export async function cmdAdd(argv, { stdout = process.stdout, stderr = process.s
   const model = flagOptionalString(flags, "model");
   const agent = flagOptionalString(flags, "agent");
   const onComplete = flagOptionalString(flags, "on-complete");
+  const when = flagOptionalString(flags, "when");
+  // A bare `--when-timeout` is `true`; createTick's parseWhenTimeout rejects it.
+  const whenTimeout = flags["when-timeout"];
   // A bare value flag becomes `true`, which downstream validators would
   // coerce (Number(true) === 1) or stringify; reject it up front.
   for (const name of ["minutes", "seconds", "offset-minutes", "offset-seconds", "time", "days", "at"]) {
@@ -200,10 +209,12 @@ export async function cmdAdd(argv, { stdout = process.stdout, stderr = process.s
     scheduleOpts: flags,
     enabled,
     model,
-    // CLI-only: the tick_create tool never passes an agent or onComplete
-    // (see agents/command.mjs and callback.mjs).
+    // CLI-only: the tick_create tool never passes an agent, onComplete or
+    // when (see agents/command.mjs, callback.mjs and guard.mjs).
     agent,
     onComplete,
+    when,
+    whenTimeout,
     // Raw flag values (string, `true` for a bare flag, or undefined) —
     // createTick is the single place that runs them through
     // flagOptionalU32's validation, for both this CLI path and the tool.

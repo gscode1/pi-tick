@@ -63,6 +63,10 @@ export async function cmdRun(argv, { stdout = process.stdout, stderr = process.s
   // Trigger kind comes from an explicit --manual flag, not process.env
   // (issue #48). Manual runs never consume a one-shot schedule.
   const trigger = (flags.manual === true || flags.manual === "true") ? "manual" : "external";
+  // --no-when bypasses the job's --when guard for this manual run only: a
+  // scheduler entry must never skip its guard.
+  const skipGuard = flags["no-when"] === true || flags["no-when"] === "true";
+  if (skipGuard && trigger !== "manual") fail(`--no-when only applies with --manual`, 2);
 
   // Explicit manual runs ignore `enabled` so a job can be tested without
   // registering it with the scheduler. Scheduler-triggered runs skip disabled
@@ -167,8 +171,17 @@ export async function cmdRun(argv, { stdout = process.stdout, stderr = process.s
     logsDir: logsDir(),
     envPath: augmentedPath(),
     defaultModel: config.defaultModel,
+    skipGuard,
     stderr
   });
+
+  // A guard that skipped the run is routine (quiet for the scheduler's log
+  // files); a broken guard is always reported.
+  if (result.reason === "skipped" && trigger === "manual") {
+    stderr.write(`pi-tick: guard (--when) exited 1; nothing to do, run skipped (use --no-when to run anyway)\n`);
+  } else if (result.reason === "guard_failed") {
+    stderr.write(`pi-tick: ${result.error}; run not started\n`);
+  }
 
   // Unregister only after the run has finished and been recorded. Under
   // launchd, `bootout` terminates the job's own process, so doing it before
