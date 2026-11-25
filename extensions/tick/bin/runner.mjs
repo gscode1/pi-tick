@@ -360,17 +360,23 @@ async function updateLastRunAndPrune(jobId, record, { transcriptPath, finishedAt
       const cat = loadCatalog();
       j = findJob(cat, jobId);
       if (j) {
-        j.lastRun = {
-          startedAt: record.startedAt,
-          finishedAt: record.finishedAt,
-          exitCode: record.exitCode,
-          reason: record.reason,
-          error: record.error,
-        };
-        if (transcriptPath) j.lastRun.transcriptPath = transcriptPath;
-        if (record.tokens) j.lastRun.tokens = record.tokens;
-        if (record.agent) j.lastRun.agent = record.agent;
-        if (record.finalTextPreview) j.lastRun.finalTextPreview = record.finalTextPreview;
+        if (record.reason === "skipped") {
+          // A guard skip is a fire, but must not replace lastRun: it would
+          // mask a previous failure. doctor/list read lastSkippedAt too.
+          j.lastSkippedAt = record.startedAt;
+        } else {
+          j.lastRun = {
+            startedAt: record.startedAt,
+            finishedAt: record.finishedAt,
+            exitCode: record.exitCode,
+            reason: record.reason,
+            error: record.error,
+          };
+          if (transcriptPath) j.lastRun.transcriptPath = transcriptPath;
+          if (record.tokens) j.lastRun.tokens = record.tokens;
+          if (record.agent) j.lastRun.agent = record.agent;
+          if (record.finalTextPreview) j.lastRun.finalTextPreview = record.finalTextPreview;
+        }
         j.updatedAt = finishedAt;
 
         const nowMs = Date.now();
@@ -498,10 +504,12 @@ export async function runJob(job, trigger, options) {
   if (whenStdout !== null) env.PI_TICK_WHEN_STDOUT = whenStdout;
   // pi prompts get {{when.stdout}} filled in (empty without a guard). Command
   // jobs run the prompt as shell text, so there it is only in the env var.
-  const runSpec = adapter.id === "pi" ? { ...job, prompt: substituteWhenStdout(job.prompt, whenStdout ?? "") } : job;
+  // The run mode (slash command / taskflow) is classified from the original
+  // job.prompt; the substituted text is only what gets sent.
+  const promptText = adapter.id === "pi" ? substituteWhenStdout(job.prompt, whenStdout ?? "") : job.prompt;
 
-  const { isSlashCommand, args, effectiveModel } = adapter.plan(runSpec, { defaultModel });
-  const isTaskflow = adapter.id === "pi" && isTaskflowPrompt(runSpec.prompt);
+  const { isSlashCommand, args, effectiveModel } = adapter.plan(job, { defaultModel, promptText });
+  const isTaskflow = adapter.id === "pi" && isTaskflowPrompt(job.prompt);
   // piPath is the pi binary; other adapters name their own executable.
   const executable = adapter.id === "pi" ? piPath : adapter.resolve(job);
 
@@ -582,7 +590,7 @@ export async function runJob(job, trigger, options) {
   const rpc = adapter.lifecycle({ isSlashCommand, child });
   // Keep RPC stdin open until the assistant turn finishes (see
   // createRpcLifecycle in agents/pi.mjs for why).
-  rpc.writePrompt(runSpec.prompt);
+  rpc.writePrompt(promptText);
 
   // Issue #48 — trigger is always passed explicitly by callers now (cmdRun
   // reads --manual, not process.env). "external" only covers direct

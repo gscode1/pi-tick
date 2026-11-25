@@ -51,6 +51,7 @@ function ms(iso) {
 function overdueProblem(job, now) {
   const baseline = Math.max(
     ms(job.lastRun?.startedAt) ?? 0,
+    ms(job.lastSkippedAt) ?? 0, // a guard skip is a fire
     ms(job.registration?.registeredAt ?? job.updatedAt ?? job.createdAt) ?? 0,
   );
   const s = job.schedule;

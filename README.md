@@ -221,7 +221,8 @@ Other behavior:
   refused and `pi-tick kill` stops the guard.
 - A `skipped` or `guard_failed` run is a fire as far as `list` and `doctor`
   are concerned, so a guarded job that is mostly idle is not reported as
-  `overdue`. `doctor` does report a job whose last run was `guard_failed`
+  `overdue`. A skip does not replace the job's last run, so an earlier failure
+  stays visible. `doctor` does report a job whose last run was `guard_failed`
   (`failing`), since its agent never runs.
 - `pi-tick log` hides `skipped` rows by default (`--all` shows them);
   `guard_failed` rows are always shown. `pi-tick show` prints the guard.
@@ -510,6 +511,9 @@ after changing them.
   in seconds (absent means 60).
 - `timeoutMs`, `idleTimeoutMs`, `maxOutputBytes`, `killGraceMs` — runtime
   limits; `null` means the runner's default.
+- `lastSkippedAt` — written when a `--when` guard skips a run. A skip never
+  replaces `lastRun`, so it cannot hide an earlier failure; `doctor` counts it
+  as the job's latest fire.
 - `lastRun` — written by the runner; `null` until first run. Carries the
   same fields as a `RunRecord` (see below) plus `transcriptPath` and
   `finalTextPreview` so a fresh `pi-tick show <id>` can render the latest
@@ -622,7 +626,7 @@ Tests use Node's built-in `node:test` runner and run against pi 1.6
 The launchctl and `pi` calls are stubbed via PATH overrides; the test
 suite does not touch the user's real data dir or LaunchAgents.
 
-The current suite has **505 tests** across the CLI, catalog, extension,
+The current suite has **507 tests** across the CLI, catalog, extension,
 backends, runner, and transcript behavior (the macOS-only launchd smoke test
 is run separately via `npm run test:macos`).
 

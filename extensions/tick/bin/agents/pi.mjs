@@ -51,14 +51,25 @@ export function protectPromptArg(prompt) {
 // (including saved taskflows — /tf itself expands to a model turn, and
 // unconstrained scheduled runs often pick the wrong first tool) runs as a
 // one-shot prompt.
-export function buildRunArgs(job, { defaultModel }) {
-  const tfPrompt = taskflowPrompt(job.prompt);
-  const isSlashCommand = !tfPrompt && job.prompt.trimStart().startsWith("/");
+//
+// `promptText` is the prompt with `{{when.stdout}}` filled in. Which mode the
+// job runs in is decided from the ORIGINAL job.prompt only, so guard output
+// (possibly from untrusted data) can never turn a prompt into a slash command
+// or a taskflow call; promptText only supplies the text that is sent.
+export function buildRunArgs(job, { defaultModel, promptText = job.prompt }) {
+  const tfBase = taskflowPrompt(job.prompt);
+  const tfPrompt = tfBase && (taskflowPrompt(promptText) ?? tfBase);
+  const isSlashCommand = !tfBase && job.prompt.trimStart().startsWith("/");
   const args = isSlashCommand ? ["--mode", "rpc", "--no-session"] : ["--mode", "json", "-p", "--no-session"];
   const effectiveModel = job.model ?? defaultModel ?? null;
   if (effectiveModel) args.push("--model", effectiveModel);
   if (tfPrompt) args.push("--tools", "taskflow");
-  if (!isSlashCommand) args.push(protectPromptArg(tfPrompt || job.prompt));
+  if (!isSlashCommand) {
+    let text = tfPrompt || promptText;
+    // A non-slash prompt must not become one through the inserted text.
+    if (!tfPrompt && text.trimStart().startsWith("/")) text = ` ${text}`;
+    args.push(protectPromptArg(text));
+  }
   return { isSlashCommand, args, effectiveModel };
 }
 

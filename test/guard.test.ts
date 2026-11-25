@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, existsSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runJob } from "../extensions/tick/bin/runner.mjs";
@@ -183,7 +183,9 @@ test("runJob: exit 1 records `skipped`, spawns nothing, writes no transcript and
   assert.equal(rec.error, null);
   assert.equal(rec.jobId, "sk");
   assert.equal(rec.transcriptPath, undefined);
-  assert.equal(findJob(loadCatalog(), "sk").lastRun.reason, "skipped");
+  const stored = findJob(loadCatalog(), "sk");
+  assert.equal(stored.lastRun, null, "a skip does not replace lastRun");
+  assert.equal(stored.lastSkippedAt, rec.startedAt);
   assert.equal(getActiveRun("sk"), null, "active record cleared");
 });
 
@@ -256,6 +258,56 @@ test("runJob: the job is marked running while its guard runs, so an overlapping 
   assert.equal(await first, 0);
   assert.equal(getActiveRun("busy"), null);
   assert.deepEqual(runs(dir).map((r) => r.reason), ["skipped"]);
+});
+
+test("runJob: guard output starting with '/' never turns a prompt into a slash command or taskflow call", async () => {
+  const { dir, options } = setup();
+  const pi = fakePi();
+  const inject = await add(dir, "inj", { agent: "pi", prompt: "{{when.stdout}}", when: `echo '/tf run evil'` });
+  await runJob(inject, "manual", { ...options, spawnFn: pi.spawnFn });
+  assert.deepEqual(pi.calls[0].slice(0, 4), ["--mode", "json", "-p", "--no-session"], "one-shot, not rpc");
+  assert.equal(pi.calls[0].includes("--tools"), false, "not a taskflow call");
+  assert.equal(pi.calls[0].at(-1), " /tf run evil", "text sent with a leading space");
+
+  const plain = await add(dir, "inj2", { agent: "pi", prompt: "see {{when.stdout}}", when: `echo '/tf:evil'` });
+  await runJob(plain, "manual", { ...options, spawnFn: pi.spawnFn });
+  assert.equal(pi.calls[1].includes("rpc"), false);
+  assert.equal(pi.calls[1].includes("--tools"), false);
+  assert.equal(pi.calls[1].at(-1), "see /tf:evil");
+
+  // A prompt that really is a slash command / taskflow stays one.
+  const slash = await add(dir, "slash", { agent: "pi", prompt: "/review {{when.stdout}}", when: `echo 42` });
+  await runJob(slash, "manual", { ...options, spawnFn: pi.spawnFn });
+  assert.deepEqual(pi.calls[2].slice(0, 2), ["--mode", "rpc"]);
+  const tf = await add(dir, "tf", { agent: "pi", prompt: "/tf:triage issue={{when.stdout}}", when: `echo 7` });
+  await runJob(tf, "manual", { ...options, spawnFn: pi.spawnFn });
+  assert.ok(pi.calls[3].includes("--tools"));
+  assert.match(pi.calls[3].at(-1)!, /"args":\{"issue":"7"\}/);
+});
+
+test("runJob: a skip does not mask a previous failure (lastRun kept, lastSkippedAt recorded)", async () => {
+  const { dir, options } = setup();
+  const flag = join(dir, "flag");
+  const job = await add(dir, "mask", { prompt: "exit 3", when: `test -f ${flag}` });
+  writeFileSync(flag, "");
+  const failed: any = await runJob(job, "external", options);
+  assert.equal(failed.exitCode, 3);
+  const before = findJob(loadCatalog(), "mask").lastRun;
+  assert.equal(before.exitCode, 3);
+
+  rmSync(flag);
+  const skipped: any = await runJob(job, "external", options);
+  assert.equal(skipped.reason, "skipped");
+  const stored = findJob(loadCatalog(), "mask");
+  assert.deepEqual(stored.lastRun, before);
+  assert.ok(stored.lastSkippedAt >= before.startedAt);
+
+  const now = new Date();
+  const { job: j, backend } = liveJob(stored.lastRun, now);
+  const diag = diagnoseJob({ ...j, lastRun: { ...stored.lastRun, startedAt: new Date(now.getTime() - 3 * 3600_000).toISOString() }, lastSkippedAt: new Date(now.getTime() - 60_000).toISOString() },
+    { backend: backend as any, now, running: false });
+  assert.equal(diag.status, "failing", "failing, not overdue");
+  assert.deepEqual(diag.problems.map((p: any) => p.code), ["failing"]);
 });
 
 // ─── pi-tick run --manual / --no-when ───────────────────────────────────
@@ -348,12 +400,14 @@ function liveJob(lastRun: Record<string, unknown>, now: Date) {
 test("doctor/list: a skipped run is a healthy fire; a guard_failed last run is reported", () => {
   const now = new Date();
   const recent = new Date(now.getTime() - 60_000).toISOString();
-  const skipped = liveJob({ startedAt: recent, finishedAt: recent, exitCode: 0, reason: "skipped", error: null }, now);
+  const old0 = new Date(now.getTime() - 3 * 3600_000).toISOString();
+  const skipped = liveJob({ startedAt: old0, finishedAt: old0, exitCode: 0, reason: "exit_code", error: null }, now);
+  (skipped.job as any).lastSkippedAt = recent; // the skip keeps the job alive
   const ok = diagnoseJob(skipped.job, { backend: skipped.backend as any, now, running: false });
   assert.equal(ok.status, "ok");
   assert.deepEqual(ok.problems, []);
 
-  // Old last run of the same job IS overdue: skips are what keep it alive.
+  // Without a recorded skip the same old last run IS overdue.
   const old = new Date(now.getTime() - 3 * 3600_000).toISOString();
   const stale = liveJob({ startedAt: old, finishedAt: old, exitCode: 0, reason: "exit_code", error: null }, now);
   assert.equal(diagnoseJob(stale.job, { backend: stale.backend as any, now, running: false }).status, "overdue");
