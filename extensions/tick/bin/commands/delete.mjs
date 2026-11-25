@@ -1,6 +1,7 @@
 // commands/delete.mjs — `pi-tick delete <id>`.
 
-import { ensureDataDirs, loadCatalog, findJob, withCatalogLock, saveCatalog, cleanupJobArtifacts } from "../catalog.mjs";
+import { ensureDataDirs, loadCatalog, findJob, withCatalogLock, saveCatalog, cleanupJobArtifacts, loadConfig } from "../catalog.mjs";
+import { ISOLATE_WORKTREE, worktreeRootCandidates, cleanupWorktreeLeftovers, listTickBranches } from "../worktree.mjs";
 import { parseFlags } from "../argv.mjs";
 import { fail } from "../errors.mjs";
 import { validateId } from "../validate.mjs";
@@ -66,6 +67,26 @@ export async function cmdDelete(argv, { stdout = process.stdout, stderr = proces
   // no per-job artifacts survive a delete on either backend.
   cleanupJobArtifacts(id, { stderr });
 
+  // Worktree-isolated jobs: remove leftover worktree directories of crashed
+  // runs. The `tick/<id>/*` branches are the job's output and are never
+  // deleted here; say how to remove them.
+  let keptBranches = [];
+  if (preJob.isolate === ISOLATE_WORKTREE) {
+    let configRoot = null;
+    try { configRoot = loadConfig({ stderr }).worktreeDir; } catch { /* default roots */ }
+    try {
+      cleanupWorktreeLeftovers(preJob, worktreeRootCandidates(preJob, configRoot), { stderr });
+    } catch (err) {
+      stderr.write(`pi-tick: delete: worktree cleanup: ${err.message}\n`);
+    }
+    keptBranches = existsSync(preJob.cwd) ? listTickBranches(preJob.cwd, id) : [];
+  }
+
   stdout.write(`deleted job '${id}'\n`);
+  if (keptBranches.length > 0) {
+    const repo = `'${preJob.cwd.replace(/'/g, "'\\''")}'`;
+    stdout.write(`kept ${keptBranches.length} branch(es) tick/${id}/* in ${preJob.cwd}; remove them with:\n`);
+    stdout.write(`  git -C ${repo} for-each-ref --format='%(refname:short)' refs/heads/tick/${id}/ | xargs git -C ${repo} branch -D\n`);
+  }
   return 0;
 }

@@ -6,14 +6,17 @@
 // after an nvm/mise node upgrade; or the last run is older than the
 // previous expected fire; or the `--when` guard's last run failed
 // (`guard_failed`: the guard crashed or timed out, so the agent never runs).
-// A `skipped` run (guard exit 1) is a healthy fire. `--fix` re-registers jobs whose problems a fresh
+// A `skipped` run (guard exit 1) is a healthy fire. For `--isolate worktree`
+// jobs: the cwd is no longer a git work tree, `--base` no longer resolves, a
+// configured worktree root is gone or not writable, or the last run was
+// `worktree_failed` / `setup_failed`. `--fix` re-registers jobs whose problems a fresh
 // `enable` can repair (it re-resolves node and pi).
 //
 // diagnoseJob is also used by `list` (stale/overdue status) and by the
 // extension's session_start notice (attentionSummary).
 
-import { existsSync } from "node:fs";
-import { ensureDataDirs, loadCatalog, findJob } from "../catalog.mjs";
+import { existsSync, accessSync, constants as fsConstants } from "node:fs";
+import { ensureDataDirs, loadCatalog, findJob, loadConfig } from "../catalog.mjs";
 import { parseFlags } from "../argv.mjs";
 import { fail } from "../errors.mjs";
 import { stableCliPath } from "../paths.mjs";
@@ -21,6 +24,7 @@ import { activeBackend } from "../backend-info.mjs";
 import { getActiveRun } from "../run-registry.mjs";
 import { previousFireAt, resolveScheduleFields, KIND_INTERVAL, KIND_ONCE } from "../schedule.mjs";
 import { agentAdapter } from "../agents/index.mjs";
+import { ISOLATE_WORKTREE, isGitWorkTree, resolveCommitSync } from "../worktree.mjs";
 import { printTable } from "../display.mjs";
 import { cmdEnableInternal } from "./enable.mjs";
 
@@ -75,9 +79,33 @@ function overdueProblem(job, now) {
   return null;
 }
 
-// Diagnose one job. `backend` and `now` are injectable for tests.
+// Problems with a worktree-isolated job's own setup (its cwd exists). The
+// default root under the data dir is created on demand, so only a configured
+// root (the job's, else the global config's) is checked.
+function isolationProblems(job, cwd, configRoot) {
+  const out = [];
+  if (!isGitWorkTree(cwd)) {
+    out.push(problem("isolate-not-git", `--isolate worktree: cwd is not inside a git work tree: ${cwd}`));
+  } else if (resolveCommitSync(cwd, job.base) === null) {
+    out.push(problem("isolate-base-missing", `--isolate worktree: --base '${job.base}' no longer resolves in ${cwd}`));
+  }
+  const root = job.worktreeDir || configRoot;
+  if (root) {
+    const where = job.worktreeDir ? "--worktree-dir" : "config worktree-dir";
+    if (!existsSync(root)) {
+      out.push(problem("isolate-root-missing", `${where} not found: ${root}`));
+    } else {
+      try { accessSync(root, fsConstants.W_OK); } catch {
+        out.push(problem("isolate-root-unwritable", `${where} is not writable: ${root}`));
+      }
+    }
+  }
+  return out;
+}
+
+// Diagnose one job. `backend`, `now` and `config` are injectable for tests.
 // Returns { id, enabled, running, status, problems }.
-export function diagnoseJob(job, { backend = activeBackend(), now = new Date(), running } = {}) {
+export function diagnoseJob(job, { backend = activeBackend(), now = new Date(), running, config } = {}) {
   const isRunning = running ?? Boolean(getActiveRun(job.id));
   const base = { id: job.id, enabled: Boolean(job.enabled), running: isRunning };
   if (!job.enabled) return { ...base, status: "ok", problems: [] };
@@ -120,6 +148,10 @@ export function diagnoseJob(job, { backend = activeBackend(), now = new Date(), 
   const cwd = st?.paths?.cwd ?? job.cwd;
   if (cwd && !existsSync(cwd)) {
     problems.push(problem("missing-cwd", `cwd not found: ${cwd}`));
+  } else if (cwd && job.isolate === ISOLATE_WORKTREE) {
+    let configRoot = null;
+    try { configRoot = (config ?? loadConfig({ stderr: { write() {} } })).worktreeDir ?? null; } catch { /* default root */ }
+    problems.push(...isolationProblems(job, cwd, configRoot));
   }
   if (job.onComplete && !existsSync(job.onComplete)) {
     problems.push(problem("missing-on-complete", `--on-complete not found: ${job.onComplete}`));
@@ -130,6 +162,10 @@ export function diagnoseJob(job, { backend = activeBackend(), now = new Date(), 
     if (od) problems.push(od);
     if (job.lastRun?.reason === "guard_failed") {
       problems.push(problem("guard-failed", `guard (--when) failed: ${job.lastRun.error || "unknown error"}; the agent did not run`, { severity: "failing" }));
+    } else if (job.lastRun?.reason === "worktree_failed" || job.lastRun?.reason === "setup_failed") {
+      const what = job.lastRun.reason === "setup_failed" ? "setup (--setup)" : "worktree creation";
+      problems.push(problem(job.lastRun.reason === "setup_failed" ? "setup-failed" : "worktree-failed",
+        `${what} failed: ${job.lastRun.error || "unknown error"}; the agent did not run`, { severity: "failing" }));
     } else if (job.lastRun && job.lastRun.exitCode !== 0) {
       const why = job.lastRun.reason || job.lastRun.error || `exit ${job.lastRun.exitCode}`;
       problems.push(problem("failing", `last run failed: ${why}`, { severity: "failing" }));

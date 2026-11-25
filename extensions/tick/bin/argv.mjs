@@ -16,6 +16,7 @@ export const BOOLEAN_FLAGS = new Set([
   "no-when", // run
   "json", // list
   "raw", // show
+  "diff", // show
   "fix", // doctor
   "no-meta", // show
   "help",

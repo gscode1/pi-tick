@@ -81,7 +81,7 @@ pi-tick delete nightly-recap
 |---|---|
 | `pi-tick add <id> ...` | Create a job in the catalog. **Disabled by default** — pass `--enabled` to also register a launchd plist. |
 | `pi-tick list [--json]` | Print all jobs as a table (or JSON). An enabled job shows `stale` or `overdue` instead of `scheduled` when `doctor` would flag it. |
-| `pi-tick delete <id>` | Remove a job (also unloads its plist if enabled). |
+| `pi-tick delete <id>` | Remove a job (also unloads its plist if enabled). For a worktree-isolated job, also removes leftover worktree directories; its `tick/<id>/*` branches are kept and listed with the command to delete them. |
 | `pi-tick enable <id>` | Register / re-register the launchd plist. Idempotent; skips re-registering a job that is currently running. |
 | `pi-tick disable <id>` | Unload the plist and rename it to `.plist.disabled`. |
 | `pi-tick run <id> [--manual [--no-when]]` | Fire a job. With `--manual` it runs even if the job is disabled (and runs its `--when` guard; `--no-when` bypasses it); without it (scheduler path) disabled jobs are skipped with exit 0. Only one run per job at a time: a start while the job is already running is refused (exit 5 with `--manual`, exit 0 from the scheduler). SIGTERM/SIGINT to the runner kills pi's process tree and records the run as `terminated` (exit 143). |
@@ -89,7 +89,8 @@ pi-tick delete nightly-recap
 | `pi-tick log [id] [--limit N] [--failed] [--since <dur>] [--all]` | Tail the run log. `--failed` keeps only non-zero exits; `--since` keeps runs in the last `<dur>` (`30s`/`5m`/`2h`/`1d`). `skipped` runs (a `--when` guard found nothing to do) are hidden, with a count; `--all` shows them. |
 | `pi-tick transcripts <id> [--limit N]` | List transcript files for a job, newest first. |
 | `pi-tick show <id> [--run N\|--run-id <id>] [--tail M] [--raw] [--no-meta]` | Chat-style view of a transcript (default: latest). `--run N` picks the Nth most recent; `--run-id` picks a run shown by `pi-tick log`. `--tail M` keeps the last M assistant turns. `--raw` emits JSONL events, one per line (`event:` prefix for `jq` pipelines). `--no-meta` skips the run header. |
-| `pi-tick config <set\|get\|unset> <key> [value]` | Read or write tick-scoped config. Today: `default-model` (see below). |
+| `pi-tick show <id> --diff [--run-id <id>]` | Print `git diff <baseSha>..<branch>` for the job's most recent run that produced a branch (or the named run). See [Worktree isolation](#worktree-isolation---isolate-worktree). |
+| `pi-tick config <set\|get\|unset> <key> [value]` | Read or write tick-scoped config. Keys: `default-model` (see below) and `worktree-dir` (an absolute path; see [Worktree isolation](#worktree-isolation---isolate-worktree)). |
 | `pi-tick doctor [id] [--fix] [--json]` | Find enabled jobs that silently stopped firing (see below). Exits 1 when any job needs attention. |
 | `pi-tick help` | Print usage. |
 
@@ -109,6 +110,11 @@ Flags for `add`:
 - `--on-complete <abs path>` — optional executable run after each run; see [Completion hook](#completion-hook---on-complete). CLI-only.
 - `--when "<shell cmd>"` — optional guard run before each fire; see [Guard commands](#guard-commands---when). CLI-only.
 - `--when-timeout SECONDS` — optional, with `--when`; default 60.
+- `--isolate worktree` — optional; run each fire in its own git worktree and keep the result on a branch. Needs `--base`; see [Worktree isolation](#worktree-isolation---isolate-worktree). CLI-only.
+- `--base <ref>` — required with `--isolate`: the branch, tag or commit each worktree is cut from.
+- `--worktree-dir <abs path>` — optional, with `--isolate`: root for this job's worktrees.
+- `--setup "<shell cmd>"` — optional, with `--isolate`: prepares each fresh worktree (`npm ci`, copy `.env`).
+- `--setup-timeout SECONDS` — optional, with `--setup`; default 300.
 - `--enabled` — also register the schedule (launchd plist / crontab entry) in the same call
 
 Runtime limits (all optional, in ms/bytes; `0` disables where allowed):
@@ -229,6 +235,102 @@ Other behavior:
 - Like `--agent command` and `--on-complete`, it is CLI-only: `tick_create`
   has no field for it.
 
+### Worktree isolation (`--isolate worktree`)
+
+By default the agent runs in the job's `cwd`: the same checkout you work in.
+`--isolate worktree` gives every run its own git worktree instead, so a bad
+run costs you a branch to delete rather than a damaged working tree, two jobs
+on one repo cannot collide, and what a run changed is a diff to review.
+
+```sh
+pi-tick add nightly-deps --isolate worktree --base main \
+  --setup 'npm ci' \
+  --prompt "Update outdated deps and fix what breaks" \
+  --cwd ~/code/myproject --kind daily --time 02:00 --enabled
+```
+
+For each fire the runner:
+
+1. runs the `--when` guard, if any, exactly as without isolation, in the job's
+   `cwd`. `skipped` and `guard_failed` runs never create a worktree;
+2. resolves `--base` to a commit and creates a detached worktree of it at
+   `<root>/<jobId>/<runId>` (`git worktree add --detach`). If that fails the
+   run is recorded as `worktree_failed` and no agent is started;
+3. runs `--setup` there (see below). A non-zero exit, a signal or the timeout
+   records `setup_failed`, removes the worktree and starts no agent;
+4. runs the agent with the worktree as its working directory. If the job's
+   `cwd` is a subdirectory of the repository, the agent starts in the same
+   subdirectory of the worktree. The environment has `PI_TICK_WORKTREE` (the
+   worktree root) and `PI_TICK_SOURCE_CWD` (the job's `cwd`); `--setup` and
+   `--on-complete` get them too;
+5. whatever the outcome (success, failure, timeout, `pi-tick kill`, runner
+   SIGTERM), stages everything (`git add -A`), commits it with
+   `git commit --no-verify` as `pi-tick <pi-tick@localhost>` (message
+   `pi-tick: <jobId> run <runId> (<reason>)`) and creates the branch
+   `tick/<jobId>/<runId>` at HEAD. Commits the agent made itself are kept and
+   the branch points at the final HEAD. A run that changed nothing and
+   committed nothing gets **no branch**. Git hooks and commit signing are off
+   for pi-tick's own git calls;
+6. removes the worktree.
+
+The run record then says what happened (see the tables below), and
+`--on-complete` receives it on stdin, so a hook can open a PR from `branch`.
+`pi-tick show <id> --diff` prints the diff of the latest branch,
+`pi-tick log` shows the branch next to the run, and
+`pi-tick run <id> --manual` prints it on stderr.
+
+**Where worktrees live.** The root is, in order of precedence, the job's
+`--worktree-dir`, the global `pi-tick config set worktree-dir <abs path>`, or
+`<dataDir>/worktrees` (follows `PI_TICK_DATA_DIR`). The runner always appends
+`<jobId>/<runId>`, so runs never share a directory. Reasons to override: a
+monorepo layout, a bigger volume, or macOS TCC: a root under `~/Documents`
+or `~/Desktop` needs the same one-time interactive run (`pi-tick run <id>
+--manual`) as any other protected folder, because launchd cannot show the
+permission dialog.
+
+**Setup.** A fresh worktree has the tracked files of `--base` and nothing
+else: no `node_modules`, no `.env`. `--setup` is a shell command run via
+`/bin/sh -c` in the worktree (300s limit, or `--setup-timeout SECONDS`),
+before the agent:
+
+```sh
+--setup 'npm ci'
+--setup 'cp "$PI_TICK_SOURCE_CWD/.env" .env && npm ci'
+```
+
+Untracked files that exist after setup (a copied `.env`, an installed
+dependency directory that `.gitignore` does not cover) are **not** committed:
+only what the agent changes afterwards is. Setup output is not kept; on
+failure the last stderr line is in the run's `error`.
+
+**Cleanup and retention.** The worktree is removed right after each run, so
+nothing accumulates. Only a runner that was killed hard (SIGKILL, power loss)
+leaves one behind; the next run of that job sweeps leftover directories older
+than 7 days, and `pi-tick delete` removes them all. If the final commit or
+branch cannot be created, the worktree is kept so the work is not lost, and
+`worktreeError` in the run record names its path.
+
+**`tick/*` branches are never deleted by pi-tick**: not by retention, not by
+`pi-tick delete`, which instead prints the command that removes them. Review,
+merge or delete them yourself:
+
+```sh
+git -C ~/code/myproject branch --list 'tick/nightly-deps/*'
+git -C ~/code/myproject branch -D $(git -C ~/code/myproject for-each-ref --format='%(refname:short)' refs/heads/tick/nightly-deps/)
+```
+
+`add` checks that `cwd` is inside a git work tree, that `--base` resolves to a
+commit, that `--worktree-dir` is absolute and that the job id can be part of
+a branch name. `doctor` reports an isolated job (status `stale`) whose `cwd`
+is no longer a repository, whose `--base` no longer resolves, or whose
+configured root (the job's, else the config's) is missing or not writable
+(the default root is created on demand), and (status `failing`) one whose last
+run was `worktree_failed` or `setup_failed`.
+
+Like `--agent command`, `--on-complete` and `--when`, isolation is CLI-only:
+`tick_create` has no field for it. Command jobs honour it too (they run in the
+worktree).
+
 ### Silent-stop detection (`doctor`)
 
 `enable` bakes absolute paths into the scheduler entry, so a node upgrade via
@@ -237,9 +339,9 @@ without any error. `pi-tick doctor` checks every enabled job (or one `id`):
 
 | Status | Meaning |
 |---|---|
-| `stale` | The launchd/cron entry is missing, not loaded, differs from what `enable` registered, or a baked path is gone: node, the stable CLI, pi, `cwd`, `--on-complete`. |
+| `stale` | The launchd/cron entry is missing, not loaded, differs from what `enable` registered, or a baked path is gone: node, the stable CLI, pi, `cwd`, `--on-complete`. For `--isolate worktree` jobs also: `cwd` is not a git work tree, `--base` no longer resolves, or a configured worktree root is missing or not writable. |
 | `overdue` | The last run started before the previous expected fire. Calendar jobs get 10 minutes of grace; interval jobs tolerate one missed fire; plain launchd `StartInterval` jobs (no fixed phase) are overdue after two intervals plus 5 minutes. cron does not catch up after sleep, so a fire missed while asleep shows as `overdue`. |
-| `failing` | The last run failed, including a `guard_failed` run (its `--when` guard crashed or timed out). A `skipped` run is healthy. |
+| `failing` | The last run failed, including a `guard_failed` run (its `--when` guard crashed or timed out) and a `worktree_failed` / `setup_failed` run (the worktree or its `--setup` failed, so the agent never ran). A `skipped` run is healthy. |
 
 `--fix` re-runs `enable` for jobs a fresh registration can repair (missing,
 unloaded or changed entry, missing node or pi): it re-resolves node and pi
@@ -271,9 +373,9 @@ Argument completion works for all of these.
 | `tick_list` | — | The catalog as a JSON array. |
 | `tick_delete` | `jobId` | Confirmation. |
 
-`tick_create` always creates pi jobs: `agent`, `onComplete` and `when` are
-CLI-only, so a model can neither schedule a shell command nor attach a hook
-or a guard.
+`tick_create` always creates pi jobs: `agent`, `onComplete`, `when` and the
+isolation options are CLI-only, so a model can neither schedule a shell
+command nor attach a hook or a guard, nor choose where its runs happen.
 
 The LLM can create-and-enable in one call by passing `enabled: true` to
 `tick_create`. It cannot enable or disable existing jobs — to do that, the
@@ -439,11 +541,13 @@ still create-and-enable in one call by passing `enabled: true` to
 ~/.pi/agent/tick/                         # data dir, created on first session_start
 ├── jobs.json                             # the catalog (mode 0600)
 ├── runs.jsonl                            # append-only audit log (mode 0600; rotates to runs.jsonl.1 above 10 MB)
-├── config.json                           # tick-scoped config (default-model)
+├── config.json                           # tick-scoped config (default-model, worktree-dir)
 ├── pi-tick.mjs                           # stable copy of the CLI (mode 0755)
 ├── runs/                                 # per-job transcripts (mode 0700)
 │   └── nightly-recap/                    # one dir per job
 │       └── 2026-06-15T02-00-04-123Z_7c8a1234.jsonl
+├── worktrees/                            # --isolate worktree runs (default root; removed after each run)
+│   └── nightly-deps/7c8a1234/            # <jobId>/<runId>
 └── logs/                                 # scheduler + hook output (mode 0700)
     ├── nightly-recap.out.log
     ├── nightly-recap.err.log
@@ -509,6 +613,10 @@ after changing them.
 - `onComplete` — optional; absolute path of the `--on-complete` executable.
 - `when`, `whenTimeout` — optional; the `--when` guard command and its limit
   in seconds (absent means 60).
+- `isolate`, `base`, `worktreeDir`, `setup`, `setupTimeout` — optional;
+  `--isolate worktree` and its `--base`, `--worktree-dir`, `--setup` and
+  `--setup-timeout` (seconds; absent means 300). `isolate` and `base` are set
+  together; the others only when given.
 - `timeoutMs`, `idleTimeoutMs`, `maxOutputBytes`, `killGraceMs` — runtime
   limits; `null` means the runner's default.
 - `lastSkippedAt` — written when a `--when` guard skips a run. A skip never
@@ -531,11 +639,26 @@ One JSON object per line, append-only:
 - `triggerKind` — `"external"` (launchd/cron) or `"manual"` (`/tick run` or `pi-tick run --manual`; `pi-tick run` without `--manual` is `"external"`).
 - `reason` — why the run ended: `exit_code`, `signal`, `spawn_error`,
   `model_error`, `taskflow_failed`, `timeout`, `idle_timeout`, `killed`,
-  `terminated`, `output_cap`, `once_missed`, `skipped` or `guard_failed`
-  (the last two come from a `--when` guard: `skipped` has exit code 0 and no
-  transcript). `error` holds the message (≤ 200 chars) when `exitCode` is
-  non-zero.
+  `terminated`, `output_cap`, `once_missed`, `skipped`, `guard_failed`,
+  `worktree_failed` or `setup_failed`. `skipped` and `guard_failed` come from
+  a `--when` guard (`skipped` has exit code 0); `worktree_failed` and
+  `setup_failed` from `--isolate worktree`. None of these four has a
+  transcript, and no agent ran. `error` holds the message (≤ 200 chars) when
+  `exitCode` is non-zero.
 - `agent` — present only for non-pi jobs (`"command"`).
+- Worktree-isolated jobs (`--isolate worktree`) add, to every run that got as
+  far as creating (or trying to create) a worktree, failed runs included:
+
+  | Field | Meaning |
+  |---|---|
+  | `isolate` | `"worktree"`. |
+  | `baseRef` | The `--base` as given. |
+  | `baseSha` | The commit it resolved to for this run (`null` if it did not resolve). |
+  | `branch` | `tick/<jobId>/<runId>`, or `null` when the run changed and committed nothing. |
+  | `diffstat` | `{ filesChanged, insertions, deletions }` of `git diff --shortstat baseSha..branch`; `null` without a branch. |
+  | `worktreeError` | Only when committing, branching or removing the worktree failed. The run's own outcome is unchanged and the record is still written. |
+
+  `job.lastRun` carries `branch` too.
 - A pi run counts as failed (`model_error`) when pi exits 0 but the last
   assistant message stopped with `error`, `aborted` or `toolUse`. With pi
   1.1+, a reply cut off at the model's output token limit makes `pi` exit 1,
@@ -626,7 +749,7 @@ Tests use Node's built-in `node:test` runner and run against pi 1.6
 The launchctl and `pi` calls are stubbed via PATH overrides; the test
 suite does not touch the user's real data dir or LaunchAgents.
 
-The current suite has **507 tests** across the CLI, catalog, extension,
+The current suite has **532 tests** across the CLI, catalog, extension,
 backends, runner, and transcript behavior (the macOS-only launchd smoke test
 is run separately via `npm run test:macos`).
 

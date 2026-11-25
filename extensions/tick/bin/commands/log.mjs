@@ -94,7 +94,11 @@ export function cmdLog(argv, { stdout = process.stdout, stderr = process.stderr 
     return 0;
   }
 
-  const headers = ["jobId", "runId", "startedAt", "finishedAt", "duration", "exitCode", "tokens", "transcript", "error"];
+  // The branch column (worktree-isolated runs: `tick/<id>/<runId>`, the
+  // diffstat in parentheses) only appears when a shown run has a branch.
+  const showBranch = tail.some((r) => r.branch);
+  const headers = ["jobId", "runId", "startedAt", "finishedAt", "duration", "exitCode", "tokens",
+    ...(showBranch ? ["branch"] : []), "transcript", "error"];
   const rows = tail.map((r) => [
     r.jobId,
     r.runId || "",
@@ -103,8 +107,9 @@ export function cmdLog(argv, { stdout = process.stdout, stderr = process.stderr 
     `${durationSeconds(r.startedAt, r.finishedAt)}s`,
     String(r.exitCode),
     r.tokens ? `${r.tokens.input}/${r.tokens.output}` : "",
+    ...(showBranch ? [r.branch ? `${r.branch}${r.diffstat ? ` (${r.diffstat.filesChanged}f +${r.diffstat.insertions} -${r.diffstat.deletions})` : ""}` : ""] : []),
     r.transcriptPath || "",
-    r.error || (r.reason === "skipped" ? "skipped" : ""),
+    r.error || (r.worktreeError ? `worktree: ${r.worktreeError}` : "") || (r.reason === "skipped" ? "skipped" : ""),
   ]);
   printTable([headers, ...rows], { stdout });
   if (hiddenSkipped > 0) stdout.write(`(${hiddenSkipped} skipped run(s) hidden; use --all to show them)\n`);

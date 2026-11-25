@@ -16,6 +16,8 @@ Usage:
                    [--time HH:MM] [--days mon,wed,fri] \\
                    [--agent pi|command] [--model <id>] [--on-complete <abs path>] [--enabled] \\
                    [--when "<shell cmd>"] [--when-timeout SECONDS] \\
+                   [--isolate worktree --base <ref> [--worktree-dir <abs path>] \\
+                    [--setup "<shell cmd>"] [--setup-timeout SECONDS]] \\
                    [--timeout-ms N] [--idle-timeout-ms N] \\
                    [--max-output-bytes N] [--kill-grace-ms N]
   pi-tick list [--json]
@@ -27,7 +29,8 @@ Usage:
   pi-tick log [id] [--limit N] [--failed] [--since <dur>] [--all]
   pi-tick transcripts <id> [--limit N]
   pi-tick show <id> [--run N|--run-id <id>] [--tail M] [--raw] [--no-meta]
-  pi-tick config <set|get|unset> <key> [value]
+  pi-tick show <id> --diff [--run-id <id>]   (diff of an isolated run's branch)
+  pi-tick config <set|get|unset> <key> [value]   (keys: default-model, worktree-dir)
   pi-tick doctor [id] [--fix] [--json]
   pi-tick help
 
@@ -50,6 +53,17 @@ records "guard_failed". The guard's stdout (64 KiB cap) replaces
 {{when.stdout}} in a pi prompt, and is in $PI_TICK_WHEN_STDOUT for command
 jobs and --on-complete. "run --manual" runs the guard; --no-when bypasses it.
 "log" hides skipped runs unless --all.
+
+--isolate worktree gives every run its own git worktree of --base (a detached
+checkout under <worktree root>/<id>/<runId>; root = --worktree-dir, else
+"config set worktree-dir", else ~/.pi/agent/tick/worktrees). The agent runs
+there; --setup (cwd = the worktree, 300s limit or --setup-timeout) prepares it
+(npm ci, copying .env from $PI_TICK_SOURCE_CWD). Afterwards the changes are
+committed to branch tick/<id>/<runId> (none if nothing changed) and the
+worktree is removed; the run record gains branch and diffstat, --on-complete
+receives them, and "show <id> --diff" prints the diff. A run whose worktree or
+setup fails is recorded as "worktree_failed" / "setup_failed" without running
+the agent. Branches are never deleted by pi-tick.
 
   pi-tick doctor        # find enabled jobs that silently stopped: missing or
                         # changed scheduler entry, node/pi/cwd/--on-complete

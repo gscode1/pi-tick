@@ -2,9 +2,10 @@
 
 import { parseFlags } from "../argv.mjs";
 import { fail } from "../errors.mjs";
-import { findJob, loadCatalog } from "../catalog.mjs";
+import { findJob, loadCatalog, loadConfig } from "../catalog.mjs";
+import { gitSync, worktreeRoot } from "../worktree.mjs";
 import { validateId } from "../validate.mjs";
-import { readTail, compareNewestFirst } from "../format.mjs";
+import { readTail, compareNewestFirst, tailRunLines } from "../format.mjs";
 import {
   listTranscriptFiles, parseTranscriptFilename, findRunRecord,
   formatRunHeader, prettyPrintTranscript,
@@ -16,6 +17,47 @@ export const SHOW_MAX_BYTES = 32 * 1024 * 1024;
 function showMaxBytes() {
   const n = Number(process.env.PI_TICK_SHOW_MAX_BYTES);
   return Number.isSafeInteger(n) && n > 0 ? n : SHOW_MAX_BYTES;
+}
+
+// `show <id> --diff [--run-id <id>]`: the diff of the job's most recent
+// isolated run that produced a branch (or of the named run), i.e.
+// `git diff <baseSha>..<branch>` in the job's cwd.
+function showDiff(id, runId, { stdout, stderr }) {
+  let job;
+  try { job = findJob(loadCatalog(), id); } catch (err) { fail(`failed to read catalog: ${err.message}`, 1); }
+  if (!job) fail(`no such job: ${id}`, 4);
+  let rec = null;
+  let named = null;
+  for (const line of tailRunLines(Infinity)) {
+    let r;
+    try { r = JSON.parse(line); } catch { continue; }
+    if (!r || r.jobId !== id) continue;
+    if (runId !== null && r.runId === runId) named = r;
+    if (r.branch && r.baseSha && (runId === null || r.runId === runId)) rec = r;
+  }
+  if (!rec) {
+    if (runId !== null) {
+      fail(named ? `run ${runId} of job '${id}' has no branch (the agent changed nothing)` : `no run '${runId}' for job '${id}'`, 4);
+    }
+    stdout.write(job.isolate
+      ? `(no run of job '${id}' has produced a branch yet; runs that change nothing leave none)\n`
+      : `(job '${id}' is not worktree-isolated; --diff needs a job added with --isolate worktree)\n`);
+    return 0;
+  }
+  const r = gitSync(["diff", "--no-ext-diff", `${rec.baseSha}..${rec.branch}`, "--"], { cwd: job.cwd });
+  if (!r.ok) fail(`cannot diff ${rec.branch} in ${job.cwd}: ${r.message} (was the branch deleted?)`, 1);
+  stderr.write(`pi-tick: run ${rec.runId}: ${rec.branch} (base ${rec.baseRef ?? "?"} ${String(rec.baseSha).slice(0, 12)}) in ${job.cwd}\n`);
+  stdout.write(r.stdout);
+  if (r.stdout === "") stdout.write("(empty diff)\n");
+  return 0;
+}
+
+export function isolationLine(job, configRoot = null) {
+  if (!job?.isolate) return null;
+  const parts = [`isolation: ${job.isolate} (base ${job.base})`];
+  parts.push(`root ${worktreeRoot(job, configRoot)}`);
+  if (job.setup) parts.push(`setup '${job.setup}' (timeout ${job.setupTimeout ?? 300}s)`);
+  return parts.join(", ");
 }
 
 export function cmdShow(argv, { stdout = process.stdout, stderr = process.stderr } = {}) {
@@ -38,10 +80,17 @@ export function cmdShow(argv, { stdout = process.stdout, stderr = process.stderr
   const rawMode = flags.raw === true || flags.raw === "true";
   const noMeta = flags["no-meta"] === true || flags["no-meta"] === "true";
 
+  if (flags.diff === true || flags.diff === "true") return showDiff(id, runId, { stdout, stderr });
+
   if (!noMeta && !rawMode) {
     let guarded = null;
+    let configRoot = null;
     try { guarded = findJob(loadCatalog(), id); } catch { /* no catalog: nothing to show */ }
     if (guarded?.when) stdout.write(`guard (--when): ${guarded.when}${guarded.whenTimeout ? ` (timeout ${guarded.whenTimeout}s)` : ""}\n`);
+    if (guarded?.isolate) {
+      try { configRoot = loadConfig({ stderr }).worktreeDir; } catch { /* default root */ }
+      stdout.write(isolationLine(guarded, configRoot) + "\n");
+    }
   }
 
   const files = listTranscriptFiles(id).sort(compareNewestFirst);

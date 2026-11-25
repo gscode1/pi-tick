@@ -5,6 +5,7 @@ import { statSync, accessSync, constants as fsConstants } from "node:fs";
 import { isAbsolute } from "node:path";
 import { fail } from "./errors.mjs";
 import { GUARD_MAX_TIMEOUT_S } from "./guard.mjs";
+import { ISOLATE_WORKTREE, isGitWorkTree, resolveCommitSync, branchNameIsValid } from "./worktree.mjs";
 
 export const ID_REGEX = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
 export const MAX_PROMPT_BYTES = 16 * 1024;
@@ -49,16 +50,61 @@ export function validateWhen(when) {
   }
 }
 
-// `--when-timeout` in whole seconds; returns the number.
-export function parseWhenTimeout(raw) {
-  if (raw === true) fail(`--when-timeout requires a value`, 2);
+// `--when-timeout` / `--setup-timeout` in whole seconds; returns the number.
+function parseTimeoutSeconds(raw, flag) {
+  if (raw === true) fail(`${flag} requires a value`, 2);
   const str = String(raw);
   if (!/^\d+$/.test(str) || Number(str) < 1) {
-    fail(`--when-timeout must be a positive integer number of seconds (got '${raw}')`, 2);
+    fail(`${flag} must be a positive integer number of seconds (got '${raw}')`, 2);
   }
   const n = Number(str);
-  if (n > GUARD_MAX_TIMEOUT_S) fail(`--when-timeout must be at most ${GUARD_MAX_TIMEOUT_S} (got '${raw}')`, 2);
+  if (n > GUARD_MAX_TIMEOUT_S) fail(`${flag} must be at most ${GUARD_MAX_TIMEOUT_S} (got '${raw}')`, 2);
   return n;
+}
+
+export function parseWhenTimeout(raw) {
+  return parseTimeoutSeconds(raw, "--when-timeout");
+}
+
+// `--isolate worktree [--base <ref>] [--worktree-dir <abs>] [--setup <cmd>]
+// [--setup-timeout S]`. Returns the job fields to store ({} when not
+// isolated). Run after validateCwd (the git checks run in `cwd`).
+export function validateIsolation({ isolate, base, worktreeDir, setup, setupTimeout, cwd, jobId }) {
+  const given = (v) => v !== undefined && v !== null;
+  if (!given(isolate)) {
+    for (const [flag, v] of [["--base", base], ["--worktree-dir", worktreeDir], ["--setup", setup], ["--setup-timeout", setupTimeout]]) {
+      if (given(v)) fail(`${flag} requires --isolate ${ISOLATE_WORKTREE}`, 2);
+    }
+    return {};
+  }
+  if (isolate !== ISOLATE_WORKTREE) fail(`--isolate must be '${ISOLATE_WORKTREE}' (got '${isolate}')`, 2);
+  if (!given(base)) fail(`--isolate ${ISOLATE_WORKTREE} requires --base <ref>`, 2);
+  if (typeof base !== "string" || base.trim() === "" || base.startsWith("-")) {
+    fail(`--base must be a git ref (branch, tag or commit), not '${base}'`, 2);
+  }
+  if (given(worktreeDir) && (typeof worktreeDir !== "string" || !isAbsolute(worktreeDir))) {
+    fail(`--worktree-dir must be an absolute path (got '${worktreeDir}')`, 2);
+  }
+  if (given(setup)) {
+    if (typeof setup !== "string" || setup.trim().length === 0) fail(`--setup must be a non-empty shell command`, 2);
+    const bytes = Buffer.byteLength(setup, "utf8");
+    if (bytes > MAX_PROMPT_BYTES) fail(`--setup is ${bytes} bytes; maximum is ${MAX_PROMPT_BYTES}`, 2);
+  }
+  if (given(setupTimeout) && !given(setup)) fail(`--setup-timeout requires --setup`, 2);
+  const timeout = given(setupTimeout) ? parseTimeoutSeconds(setupTimeout, "--setup-timeout") : null;
+
+  if (!isGitWorkTree(cwd)) fail(`--isolate ${ISOLATE_WORKTREE}: cwd is not inside a git work tree: ${cwd}`, 2);
+  if (resolveCommitSync(cwd, base) === null) fail(`--base '${base}' does not resolve to a commit in ${cwd}`, 2);
+  if (!branchNameIsValid(jobId)) {
+    fail(`--isolate ${ISOLATE_WORKTREE}: job id '${jobId}' cannot be part of a git branch name (tick/${jobId}/<runId>); pick another id`, 2);
+  }
+  return {
+    isolate,
+    base,
+    ...(given(worktreeDir) ? { worktreeDir } : {}),
+    ...(given(setup) ? { setup } : {}),
+    ...(timeout !== null ? { setupTimeout: timeout } : {}),
+  };
 }
 
 export function validateCwd(cwd) {
