@@ -17,6 +17,10 @@ import { agentAdapter } from "./agents/index.mjs";
 import { isTaskflowPrompt } from "./agents/pi.mjs";
 import { runCallback } from "./callback.mjs";
 import { runGuard, substituteWhenStdout } from "./guard.mjs";
+import {
+  ISOLATE_WORKTREE, worktreeRoot, worktreeRootCandidates, setupTimeoutSeconds, WORKTREE_RETENTION_DAYS,
+  createWorktree, snapshotUntracked, finalizeWorktree, removeWorktree, cleanupWorktreeLeftovers,
+} from "./worktree.mjs";
 
 export const TRANSCRIPT_RETENTION_DAYS = 7;
 export const TRANSCRIPT_MAX_BYTES_PER_JOB = 500 * 1024 * 1024;
@@ -352,7 +356,7 @@ function withCallback(result, callback) {
 // per-job via lastPrunedAt (TRANSCRIPT_PRUNE_THROTTLE_MS) so high-frequency
 // jobs don't pay the readdirSync/statSync cost every run — sweeps stale
 // transcripts/logs for this job.
-async function updateLastRunAndPrune(jobId, record, { transcriptPath, finishedAt, transcriptsDir, logsDir, stderr }) {
+async function updateLastRunAndPrune(jobId, record, { transcriptPath, finishedAt, transcriptsDir, logsDir, stderr, configWorktreeRoot = null }) {
   let pruneOk = false;
   let j = null;
   try {
@@ -375,6 +379,7 @@ async function updateLastRunAndPrune(jobId, record, { transcriptPath, finishedAt
           if (transcriptPath) j.lastRun.transcriptPath = transcriptPath;
           if (record.tokens) j.lastRun.tokens = record.tokens;
           if (record.agent) j.lastRun.agent = record.agent;
+          if (record.branch) j.lastRun.branch = record.branch;
           if (record.finalTextPreview) j.lastRun.finalTextPreview = record.finalTextPreview;
         }
         j.updatedAt = finishedAt;
@@ -398,10 +403,41 @@ async function updateLastRunAndPrune(jobId, record, { transcriptPath, finishedAt
       try { pruneLogs(jobId, logsDir, { now: pruneNowMs, stderr }); } catch (err) {
         stderr.write(`pi-tick: prune logs failed: ${err.message}\n`);
       }
+      // Worktrees are removed right after each run; only a crashed run leaves
+      // one behind. `tick/*` branches are never pruned.
+      if (j && j.isolate === ISOLATE_WORKTREE) {
+        try {
+          cleanupWorktreeLeftovers(j, worktreeRootCandidates(j, configWorktreeRoot), {
+            olderThanMs: WORKTREE_RETENTION_DAYS * 86400_000, now: pruneNowMs, stderr,
+          });
+        } catch (err) {
+          stderr.write(`pi-tick: prune worktrees failed: ${err.message}\n`);
+        }
+      }
     }
   } catch (err) {
     stderr.write(`pi-tick: lastRun update failed: ${err && err.message ? err.message : err}\n`);
   }
+}
+
+// Records a run that ended before any agent was spawned (guard skip/failure,
+// worktree/setup failure): runs.jsonl, active-run cleanup, job.lastRun. A
+// `callback` factory starts --on-complete once the run is recorded (guard
+// outcomes pass none: no agent ran, nothing to hand over).
+async function recordWithoutAgent(job, record, options, callback = null) {
+  const { transcriptsDir, logsDir, stderr = process.stderr, worktreeDir } = options;
+  try { appendJsonl(runsFile(), record); } catch { /* best effort */ }
+  try { ensureFileMode(runsFile(), 0o600); } catch { /* best effort */ }
+  clearActiveRun(job.id, record.runId);
+  await updateLastRunAndPrune(job.id, record, {
+    transcriptPath: null, finishedAt: record.finishedAt, transcriptsDir, logsDir, stderr, configWorktreeRoot: worktreeDir ?? null,
+  });
+  return withCallback({
+    exitCode: record.exitCode, reason: record.reason, error: record.error,
+    startedAt: record.startedAt, finishedAt: record.finishedAt, runId: record.runId,
+    transcriptPath: null, transcriptBytes: null, tokens: undefined, finalTextPreview: undefined,
+    ...(record.isolate ? { branch: record.branch ?? null, diffstat: record.diffstat ?? null } : {}),
+  }, callback ? callback() : Promise.resolve(null));
 }
 
 // ─── Phase: guard (`--when`) ────────────────────────────────────────────
@@ -412,7 +448,7 @@ async function updateLastRunAndPrune(jobId, record, { transcriptPath, finishedAt
 // While the guard runs the job has an active-run record (its child is the
 // guard), so an overlapping tick is refused and `pi-tick kill` reaches it.
 async function runGuardPhase(job, { runId, startedAt, triggerKind, env, agent, options }) {
-  const { transcriptsDir, logsDir, stderr = process.stderr, guardSpawnFn } = options;
+  const { guardSpawnFn } = options;
   let guardChild = null;
   let terminated = false;
   let markFinished;
@@ -456,18 +492,7 @@ async function runGuardPhase(job, { runId, startedAt, triggerKind, env, agent, o
       model: null,
     };
     if (agent !== "pi") record.agent = agent;
-    try { appendJsonl(runsFile(), record); } catch { /* best effort */ }
-    try { ensureFileMode(runsFile(), 0o600); } catch { /* best effort */ }
-    clearActiveRun(job.id, runId);
-    await updateLastRunAndPrune(job.id, record, { transcriptPath: null, finishedAt, transcriptsDir, logsDir, stderr });
-    return {
-      run: false,
-      result: withCallback({
-        exitCode: record.exitCode, reason: record.reason, error: record.error,
-        startedAt, finishedAt, runId, transcriptPath: null, transcriptBytes: null,
-        tokens: undefined, finalTextPreview: undefined,
-      }, Promise.resolve(null)),
-    };
+    return { run: false, result: await recordWithoutAgent(job, record, options) };
   } finally {
     // Idempotent: also covers the pass path, where the agent's own active
     // record (same runId) replaces this one.
@@ -478,7 +503,151 @@ async function runGuardPhase(job, { runId, startedAt, triggerKind, env, agent, o
   }
 }
 
+// ─── Phase: worktree isolation (`--isolate worktree`) ───────────────────
+// Runs after the guard (skipped/guard_failed runs never create a worktree):
+// resolves --base to a sha, creates a detached worktree for this run, then
+// runs the job's --setup command in it. Resolves to
+//   { ok: true, wt, excludes }   the agent runs in wt.cwd, or
+//   { ok: false, result }        `worktree_failed` / `setup_failed` was
+//                                recorded and the worktree removed.
+// The setup child is the run's active child (like the guard's), so
+// `pi-tick kill` reaches it; a runner SIGTERM kills it and the failure is
+// recorded before the process exits.
+async function runIsolationPhase(job, { runId, startedAt, triggerKind, env, agent, options, whenStdout }) {
+  const { guardSpawnFn, stderr = process.stderr, worktreeDir: configRoot = null } = options;
+  const root = worktreeRoot(job, configRoot);
+  let setupChild = null;
+  let terminated = false;
+  let markFinished;
+  const finished = new Promise((r) => { markFinished = r; });
+  const handle = {
+    terminate: () => {
+      terminated = true;
+      if (setupChild && Number.isInteger(setupChild.pid)) {
+        try { process.kill(-setupChild.pid, "SIGKILL"); } catch { /* already gone */ }
+      }
+    },
+    finished,
+  };
+  liveRuns.add(handle);
+  syncSignalHandlers();
+  let wt = null;
+  let baseSha = null;
+  const fail = async (reason, error) => {
+    if (wt && wt.ok) await removeWorktree(job.cwd, wt.dir);
+    const record = {
+      runId, jobId: job.id, triggerKind, startedAt, finishedAt: new Date().toISOString(),
+      exitCode: 1, reason, error: String(error).slice(0, 200), model: null,
+      isolate: ISOLATE_WORKTREE, baseRef: job.base ?? null, baseSha, branch: null, diffstat: null,
+    };
+    if (agent !== "pi") record.agent = agent;
+    const extraEnv = isolationEnv(job, wt && wt.ok ? wt.dir : null);
+    return { ok: false, result: await recordWithoutAgent(job, record, options, () => runCallback(job, record, { logsDir: options.logsDir, stderr, whenStdout, extraEnv })) };
+  };
+  try {
+    wt = await createWorktree(job, { runId, root });
+    baseSha = wt.baseSha ?? null;
+    if (!wt.ok) return await fail("worktree_failed", wt.error);
+
+    const excludes = [];
+    if (job.setup) {
+      if (terminated) return await fail("setup_failed", "setup terminated");
+      const setupEnv = { ...env, ...isolationEnv(job, wt.dir), PWD: wt.cwd };
+      const setup = await runGuard(job, {
+        command: job.setup, cwd: wt.cwd, label: "setup", exit1Skips: false,
+        timeoutMs: setupTimeoutSeconds(job) * 1000,
+        env: setupEnv,
+        spawnFn: guardSpawnFn ?? spawn,
+        onSpawn: (child) => {
+          setupChild = child;
+          if (!Number.isInteger(child.pid)) return;
+          try {
+            writeActiveRun(job.id, {
+              jobId: job.id, runId, startedAt, pid: process.pid, childPid: child.pid,
+              pidStart: processStart(process.pid), childStart: processStart(child.pid),
+            });
+          } catch { /* best effort */ }
+        },
+      });
+      if (setup.outcome !== "pass") {
+        const killed = readKillRequest(job.id, runId) !== null;
+        return await fail("setup_failed", terminated ? "setup terminated" : killed ? "setup killed" : setup.error);
+      }
+      // What setup left behind (node_modules, a copied .env) is not the
+      // run's work: keep it out of the commit.
+      excludes.push(...await snapshotUntracked(wt.dir));
+    }
+    if (terminated) return await fail("setup_failed", "terminated before the agent started");
+    return { ok: true, wt, excludes };
+  } catch (err) {
+    return await fail("worktree_failed", err && err.message ? err.message : err);
+  } finally {
+    clearActiveRun(job.id, runId);
+    liveRuns.delete(handle);
+    syncSignalHandlers();
+    markFinished();
+  }
+}
+
+// Env of everything that runs for an isolated job: where its worktree is and
+// where the job's own checkout is.
+function isolationEnv(job, worktreeDir) {
+  return worktreeDir ? { PI_TICK_WORKTREE: worktreeDir, PI_TICK_SOURCE_CWD: job.cwd } : {};
+}
+
+// Commits the run's work to a branch and removes the worktree; the outcome is
+// stored on `record` (always the same fields, so a run's record says what
+// happened to its worktree). Never throws: a failure here is `worktreeError`,
+// and the run record is still written. When the work could not be saved the
+// worktree is kept (its path is in the error) rather than lost.
+async function finalizeIsolation(job, iso, record, { runId, stderr }) {
+  let fin;
+  try {
+    fin = await finalizeWorktree(job, { dir: iso.wt.dir, baseSha: iso.wt.baseSha, runId, reason: record.reason, excludes: iso.excludes });
+  } catch (err) {
+    fin = { branch: null, diffstat: null, error: err && err.message ? err.message : String(err), keep: true };
+  }
+  let error = fin.error;
+  if (fin.keep) {
+    error = `${error}; worktree kept at ${iso.wt.dir}`;
+  } else {
+    try {
+      if (!await removeWorktree(job.cwd, iso.wt.dir)) error = `${error ? `${error}; ` : ""}worktree not removed: ${iso.wt.dir}`;
+    } catch (err) {
+      error = `${error ? `${error}; ` : ""}worktree not removed: ${err && err.message ? err.message : err}`;
+    }
+  }
+  record.isolate = ISOLATE_WORKTREE;
+  record.baseRef = job.base ?? null;
+  record.baseSha = iso.wt.baseSha;
+  record.branch = fin.branch;
+  record.diffstat = fin.diffstat;
+  if (error) {
+    record.worktreeError = error.slice(0, 500);
+    stderr.write(`pi-tick: worktree: ${record.worktreeError}\n`);
+  }
+}
+
+// Keeps the runner-level termination handlers installed for the whole of a
+// run. Each phase (guard, isolation, agent) registers its own handle, but
+// removes it when it ends; between two phases (and between spawning the agent
+// and registering its handle, which waits on synchronous `ps` calls) no handle
+// would exist, handlers would be uninstalled, and a SIGTERM landing there
+// would kill the runner by the default action instead of recording the run as
+// `terminated`. The hold never delays exit itself: the phase handles do that.
 export async function runJob(job, trigger, options) {
+  const hold = { terminate() {}, finished: Promise.resolve() };
+  liveRuns.add(hold);
+  syncSignalHandlers();
+  try {
+    return await runJobInner(job, trigger, options);
+  } finally {
+    liveRuns.delete(hold);
+    syncSignalHandlers();
+  }
+}
+
+async function runJobInner(job, trigger, options) {
   const { piPath, transcriptsDir, logsDir, spawnFn = spawn, stderr = process.stderr, envPath, defaultModel } = options;
   const drainMs = Number.isFinite(options.drainMs) ? options.drainMs : STREAM_DRAIN_MS;
 
@@ -491,6 +660,8 @@ export async function runJob(job, trigger, options) {
   const env = { ...process.env, PWD: job.cwd, CONTEXT_MODE_BRIDGE_DEPTH: process.env.CONTEXT_MODE_BRIDGE_DEPTH || "1" };
   if (envPath) env.PATH = envPath;
   delete env.PI_TICK_WHEN_STDOUT;
+  delete env.PI_TICK_WORKTREE;
+  delete env.PI_TICK_SOURCE_CWD;
 
   // --when guard (skipped by `run --manual --no-when`): exit 0 runs the
   // agent with the guard's stdout; anything else ends the run here, before a
@@ -513,6 +684,22 @@ export async function runJob(job, trigger, options) {
   // piPath is the pi binary; other adapters name their own executable.
   const executable = adapter.id === "pi" ? piPath : adapter.resolve(job);
 
+  // --isolate worktree: after the guard (a skipped run costs nothing), a
+  // fresh detached worktree of --base plus the optional --setup command. The
+  // agent then runs there; see finalizeIsolation for what happens after.
+  let iso = null;
+  let runCwd = job.cwd;
+  if (job.isolate === ISOLATE_WORKTREE) {
+    const phase = await runIsolationPhase(job, { runId, startedAt, triggerKind, env, agent: adapter.id, options, whenStdout });
+    if (!phase.ok) return phase.result;
+    iso = phase;
+    runCwd = phase.wt.cwd;
+    env.PWD = runCwd;
+    Object.assign(env, isolationEnv(job, phase.wt.dir));
+  }
+  const isoEnv = iso ? isolationEnv(job, iso.wt.dir) : {};
+  const configWorktreeRoot = options.worktreeDir ?? null;
+
   let transcriptStream = null;
   let transcriptPath = null;
   let transcriptWriteError = null;
@@ -534,7 +721,7 @@ export async function runJob(job, trigger, options) {
   try {
     // Execute Pi directly so the OS handles shell wrappers, shebangs, and binaries.
     child = spawnFn(executable, args, {
-      cwd: job.cwd,
+      cwd: runCwd,
       stdio: [isSlashCommand ? "pipe" : "ignore", "pipe", "pipe"],
       env,
       // detached makes the child its own process-group leader, so /tick
@@ -551,14 +738,15 @@ export async function runJob(job, trigger, options) {
       spawnErr: err, stderrBuf: "", finalText: "", effectiveModel, agent: adapter.id,
       transcriptPath: existingTranscriptPath, transcriptBytes: existingTranscriptPath ? 0 : null,
     });
+    if (iso) await finalizeIsolation(job, iso, record, { runId, stderr });
     try { appendJsonl(runsFile(), record); } catch { /* best effort */ }
     try { ensureFileMode(runsFile(), 0o600); } catch { /* best effort */ }
     await updateLastRunAndPrune(job.id, record, {
-      transcriptPath: existingTranscriptPath, finishedAt, transcriptsDir, logsDir, stderr,
+      transcriptPath: existingTranscriptPath, finishedAt, transcriptsDir, logsDir, stderr, configWorktreeRoot,
     });
     return withCallback(
       { ...record, transcriptPath: existingTranscriptPath, transcriptBytes: existingTranscriptPath ? 0 : null },
-      runCallback(job, record, { logsDir, stderr, whenStdout }),
+      runCallback(job, record, { logsDir, stderr, whenStdout, extraEnv: isoEnv }),
     );
   }
 
@@ -731,11 +919,15 @@ export async function runJob(job, trigger, options) {
         transcriptPath, transcriptBytes, agent: adapter.id, taskflow: isTaskflow,
       });
 
+      // Commit what the agent left to a branch and remove the worktree before
+      // the record is written, so the record (and --on-complete) carry it.
+      if (iso) await finalizeIsolation(job, iso, record, { runId, stderr });
+
       try { appendJsonl(runsFile(), record); } catch { /* best effort */ }
       try { ensureFileMode(runsFile(), 0o600); } catch { /* best effort */ }
       clearActiveRun(job.id, runId);
 
-      await updateLastRunAndPrune(job.id, record, { transcriptPath, finishedAt, transcriptsDir, logsDir, stderr });
+      await updateLastRunAndPrune(job.id, record, { transcriptPath, finishedAt, transcriptsDir, logsDir, stderr, configWorktreeRoot });
 
       liveRuns.delete(handle);
       syncSignalHandlers();
@@ -755,7 +947,8 @@ export async function runJob(job, trigger, options) {
         transcriptBytes,
         tokens: record.tokens,
         finalTextPreview: record.finalTextPreview,
-      }, runCallback(job, record, { logsDir, stderr, whenStdout })));
+        ...(iso ? { branch: record.branch, diffstat: record.diffstat } : {}),
+      }, runCallback(job, record, { logsDir, stderr, whenStdout, extraEnv: isoEnv })));
     };
 
     child.on("error", (err) => {

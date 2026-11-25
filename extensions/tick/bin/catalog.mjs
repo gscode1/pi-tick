@@ -1,6 +1,6 @@
 import { readFileSync, writeFileSync, appendFileSync, statSync, mkdirSync, unlinkSync, renameSync, existsSync, chmodSync, readdirSync, openSync, closeSync, writeSync, fsyncSync, rmSync, linkSync, lstatSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { join } from "node:path";
+import { join, isAbsolute } from "node:path";
 import {
   dataDir,
   jobsFile,
@@ -357,7 +357,7 @@ export function resetConfigWarning() { configWarned = false; }
 // is reported rather than hidden behind defaults.
 export function loadConfig({ stderr = process.stderr, strict = false } = {}) {
   const p = configFile();
-  if (!existsSync(p)) return { defaultModel: null };
+  if (!existsSync(p)) return { defaultModel: null, worktreeDir: null };
   let parsed;
   let problem = null;
   try {
@@ -373,13 +373,17 @@ export function loadConfig({ stderr = process.stderr, strict = false } = {}) {
       configWarned = true;
       try { stderr.write(`pi-tick: warning: ${msg}; using defaults\n`); } catch { /* */ }
     }
-    return { defaultModel: null };
+    return { defaultModel: null, worktreeDir: null };
   }
-  // Be lenient: drop junk fields, keep `defaultModel` if it's a non-empty string.
+  // Be lenient: drop junk fields, keep `defaultModel` if it's a non-empty
+  // string and `worktreeDir` if it's an absolute path.
   const dm = typeof parsed.defaultModel === "string" && parsed.defaultModel.length > 0
     ? parsed.defaultModel
     : null;
-  return { defaultModel: dm };
+  const wd = typeof parsed.worktreeDir === "string" && isAbsolute(parsed.worktreeDir)
+    ? parsed.worktreeDir
+    : null;
+  return { defaultModel: dm, worktreeDir: wd };
 }
 
 export function saveConfig(cfg) {

@@ -171,6 +171,7 @@ export async function cmdRun(argv, { stdout = process.stdout, stderr = process.s
     logsDir: logsDir(),
     envPath: augmentedPath(),
     defaultModel: config.defaultModel,
+    worktreeDir: config.worktreeDir,
     skipGuard,
     stderr
   });
@@ -181,6 +182,10 @@ export async function cmdRun(argv, { stdout = process.stdout, stderr = process.s
     stderr.write(`pi-tick: guard (--when) exited 1; nothing to do, run skipped (use --no-when to run anyway)\n`);
   } else if (result.reason === "guard_failed") {
     stderr.write(`pi-tick: ${result.error}; run not started\n`);
+  } else if (result.reason === "worktree_failed" || result.reason === "setup_failed") {
+    stderr.write(`pi-tick: ${result.reason === "setup_failed" ? "" : "worktree: "}${result.error}; run not started\n`);
+  } else if (result.branch && trigger === "manual") {
+    stderr.write(`pi-tick: changes are on branch ${result.branch} in ${job.cwd}\n`);
   }
 
   // Unregister only after the run has finished and been recorded. Under

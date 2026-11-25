@@ -15,7 +15,7 @@ import { ensureDataDirs, loadCatalog, saveCatalog, findJob, findJobIgnoreCase, w
 import { parseFlags, flagString, flagOptionalString, flagOptionalU32 } from "../argv.mjs";
 import { fail } from "../errors.mjs";
 import { PiTickError } from "../catalog.mjs";
-import { validateId, validatePrompt, validateCwd, validateExecutable, validateWhen, parseWhenTimeout } from "../validate.mjs";
+import { validateId, validatePrompt, validateCwd, validateExecutable, validateWhen, parseWhenTimeout, validateIsolation } from "../validate.mjs";
 import { buildSchedule, KIND_INTERVAL, KIND_DAILY, KIND_WEEKLY, KIND_ONCE } from "../schedule.mjs";
 import { cmdEnableInternal } from "./enable.mjs";
 
@@ -79,6 +79,10 @@ export async function createTick(params, { stdout = process.stdout, stderr = pro
   if (when !== null) validateWhen(when);
   if (params.whenTimeout != null && when === null) fail(`--when-timeout requires --when`, 2);
   const whenTimeout = params.whenTimeout == null ? null : parseWhenTimeout(params.whenTimeout);
+  const isolation = validateIsolation({
+    isolate: params.isolate, base: params.base, worktreeDir: params.worktreeDir,
+    setup: params.setup, setupTimeout: params.setupTimeout, cwd, jobId: id,
+  });
 
   // Runtime controls arrive as plain numbers here (CLI flags are parsed by
   // the caller, the tool's params are already numbers) — reuse
@@ -117,6 +121,7 @@ export async function createTick(params, { stdout = process.stdout, stderr = pro
     ...(onComplete ? { onComplete } : {}),
     ...(when !== null ? { when } : {}),
     ...(whenTimeout !== null ? { whenTimeout } : {}),
+    ...isolation,
     piPath: null,
     nodePath: null,
     createdAt: now,
@@ -195,6 +200,12 @@ export async function cmdAdd(argv, { stdout = process.stdout, stderr = process.s
   const when = flagOptionalString(flags, "when");
   // A bare `--when-timeout` is `true`; createTick's parseWhenTimeout rejects it.
   const whenTimeout = flags["when-timeout"];
+  const isolate = flagOptionalString(flags, "isolate");
+  const base = flagOptionalString(flags, "base");
+  const worktreeDir = flagOptionalString(flags, "worktree-dir");
+  const setup = flagOptionalString(flags, "setup");
+  // Bare `--setup-timeout` is `true`; validateIsolation rejects it.
+  const setupTimeout = flags["setup-timeout"];
   // A bare value flag becomes `true`, which downstream validators would
   // coerce (Number(true) === 1) or stringify; reject it up front.
   for (const name of ["minutes", "seconds", "offset-minutes", "offset-seconds", "time", "days", "at"]) {
@@ -209,12 +220,18 @@ export async function cmdAdd(argv, { stdout = process.stdout, stderr = process.s
     scheduleOpts: flags,
     enabled,
     model,
-    // CLI-only: the tick_create tool never passes an agent, onComplete or
-    // when (see agents/command.mjs, callback.mjs and guard.mjs).
+    // CLI-only: the tick_create tool never passes an agent, onComplete,
+    // when or isolation (see agents/command.mjs, callback.mjs, guard.mjs
+    // and worktree.mjs).
     agent,
     onComplete,
     when,
     whenTimeout,
+    isolate,
+    base,
+    worktreeDir,
+    setup,
+    setupTimeout,
     // Raw flag values (string, `true` for a bare flag, or undefined) —
     // createTick is the single place that runs them through
     // flagOptionalU32's validation, for both this CLI path and the tool.
