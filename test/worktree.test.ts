@@ -478,7 +478,7 @@ test("on-complete: also runs for worktree_failed and setup_failed", async () => 
 
 test("show --diff prints the diff of the latest run with a branch (--run-id picks one); show prints the isolation settings", async () => {
   const { dir, repo, options } = setup();
-  const job = await add(repo, "diffy", `echo "line $RANDOM" > r.txt`, { setup: "true", setupTimeout: 45 });
+  const job = await add(repo, "diffy", `echo "line $$" > r.txt`, { setup: "true", setupTimeout: 45 });
   const none = capture();
   assert.equal(cmdShow(["diffy", "--diff"], { stdout: none.stream, stderr: quiet }), 0);
   assert.match(none.text(), /no run of job 'diffy' has produced a branch yet/);
