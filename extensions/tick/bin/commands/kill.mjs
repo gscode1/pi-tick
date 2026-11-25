@@ -24,6 +24,7 @@ export async function cmdKill(argv, { stdout = process.stdout, stderr = process.
     stdout.write(`job '${id}' has no running process (already finished)\n`);
     return 0;
   }
-  stdout.write(`killed job '${id}' (pid ${result.pid}, ${result.signal})\n`);
+  const note = result.orphaned ? "; its runner had already died" : "";
+  stdout.write(`killed job '${id}' (pid ${result.pid}, ${result.signal}${note})\n`);
   return 0;
 }

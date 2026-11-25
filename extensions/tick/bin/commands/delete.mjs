@@ -38,12 +38,16 @@ export async function cmdDelete(argv, { stdout = process.stdout, stderr = proces
   }
 
   // Slow backend call: OUTSIDE the lock (see commands/enable.mjs for why).
-  // launchd: always run, since a disabled job leaves a .plist.disabled that
-  // unregisterAndDelete also removes. cron has no leftover for disabled jobs
-  // (disable already removed the crontab entry), so skip it there.
-  if (preJob.enabled || activeBackend().name === "launchd") {
-    const r = await activeBackend().unregisterAndDelete(id);
-    if (!r.ok) fail(r.error, 1);
+  // Always run: launchd leaves a .plist.disabled that unregisterAndDelete also
+  // removes, and cron may still hold an entry for a catalog-disabled job (a
+  // one-shot whose self-unregister failed). Both are idempotent when nothing
+  // is registered (cron does not even rewrite the crontab).
+  const r = await activeBackend().unregisterAndDelete(id);
+  if (!r.ok) {
+    // A disabled job has nothing live to protect; don't let an unreadable
+    // crontab block deleting it.
+    if (preJob.enabled) fail(r.error, 1);
+    stderr.write(`pi-tick: warning: could not clean up scheduler entry for '${id}': ${r.error}\n`);
   }
 
   await withCatalogLock(async () => {

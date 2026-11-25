@@ -14,6 +14,7 @@ import { writeActiveRun, clearActiveRun, readKillRequest, processStart } from ".
 import { runsFile, JOB_LOG_FILES } from "./paths.mjs";
 import { transcriptStartMs } from "./format.mjs";
 import { agentAdapter } from "./agents/index.mjs";
+import { isTaskflowPrompt } from "./agents/pi.mjs";
 import { runCallback } from "./callback.mjs";
 
 export const TRANSCRIPT_RETENTION_DAYS = 7;
@@ -135,10 +136,15 @@ export function extractStderrSignature(stderrBuf) {
   return null;
 }
 
+// Only meaningful for jobs whose prompt is a taskflow prompt (the caller
+// checks); requires a real failure structure — a "Taskflow ... failed" header
+// line or an explicit Failed at:/Reason:/Error: line — not just the words.
 export function extractTaskflowFailure(text) {
   if (!text || !/taskflow/i.test(text) || !/failed/i.test(text)) return null;
   const error = text.match(/^\s*(?:[-*]\s*)?(?:error|reason|cause):\s*(.+)$/im)?.[1]?.trim();
   const failedAt = text.match(/^\s*(?:[-*]\s*)?(?:failed at|halted at):\s*`?([^`\n]+)`?/im)?.[1]?.trim();
+  const header = /^[\s#*_>-]*taskflow\b[^\n]*\bfailed\b/im.test(text);
+  if (!error && !failedAt && !header) return null;
   return error || (failedAt ? `taskflow failed at ${failedAt}` : "taskflow failed");
 }
 
@@ -157,6 +163,9 @@ const MAX_TIMER_MS = 2147483647;
 // After the child process exits, how long to keep reading its stdout/stderr
 // before giving up on them (a descendant may hold the pipes open) — issue #26.
 export const STREAM_DRAIN_MS = 2000;
+// Longest stdout line (UTF-16 chars) parsed as an event. pi's agent_end /
+// message_end events carry the whole conversation and can exceed 1MB.
+const MAX_LINE_CHARS = 64 * 1024 * 1024;
 const clampDelay = (ms) => Math.min(ms, MAX_TIMER_MS);
 
 function createRunControls(child, { timeoutMs, idleTimeoutMs, killGraceMs }) {
@@ -258,7 +267,7 @@ function buildRunRecord({
   runId, jobId, triggerKind, startedAt, finishedAt,
   code, signal, spawnErr, killReason, transcriptWriteError,
   stderrBuf, finalText, finalError, effectiveModel, lastUsage,
-  transcriptPath, transcriptBytes, agent = "pi",
+  transcriptPath, transcriptBytes, agent = "pi", taskflow = false,
 }) {
   let exitCode = typeof code === "number" ? code : 1;
   let error = null;
@@ -291,7 +300,7 @@ function buildRunRecord({
   } else if (exitCode === 0) {
     // Taskflow failures are reported in pi's final text; a command job's
     // stdout is the script's own business.
-    const taskflowFailure = agent === "pi" ? extractTaskflowFailure(finalText) : null;
+    const taskflowFailure = agent === "pi" && taskflow ? extractTaskflowFailure(finalText) : null;
     if (taskflowFailure) {
       exitCode = 1;
       reason = "taskflow_failed";
@@ -394,6 +403,7 @@ export async function runJob(job, trigger, options) {
 
   const adapter = agentAdapter(job.agent);
   const { isSlashCommand, args, effectiveModel } = adapter.plan(job, { defaultModel });
+  const isTaskflow = adapter.id === "pi" && isTaskflowPrompt(job.prompt);
   // piPath is the pi binary; other adapters name their own executable.
   const executable = adapter.id === "pi" ? piPath : adapter.resolve(job);
 
@@ -490,6 +500,7 @@ export async function runJob(job, trigger, options) {
   // runJob() callers (tests) that don't pass a trigger at all.
   let spawnErr = null;
   let lineBuf = "";
+  let lineOverflow = false; // current line exceeded MAX_LINE_CHARS: dropping the rest of it
 
   const controls = createRunControls(child, {
     timeoutMs: Number.isFinite(job.timeoutMs) ? job.timeoutMs : RUNTIME_DEFAULTS.timeoutMs,
@@ -497,6 +508,17 @@ export async function runJob(job, trigger, options) {
     killGraceMs: Number.isFinite(job.killGraceMs) ? job.killGraceMs : RUNTIME_DEFAULTS.killGraceMs,
   });
   const maxOutputBytes = Number.isFinite(job.maxOutputBytes) ? job.maxOutputBytes : RUNTIME_DEFAULTS.maxOutputBytes;
+
+  // A line past MAX_LINE_CHARS can't be parsed within bounded memory: drop it,
+  // but an agent_end (the end-of-turn marker) is recognised from its head so
+  // RPC stdin still gets closed instead of the job hanging to the wall timeout.
+  // Starts mid-line when called from the streaming path; the rest of the line
+  // is skipped until its newline (lineOverflow).
+  const noteOverflow = (head) => {
+    if (/^\s*\{\s*"type"\s*:\s*"agent_end"/.test(head.slice(0, 256))) rpc.handleLine('{"type":"agent_end"}');
+    lineOverflow = true;
+    lineBuf = "";
+  };
 
   const outputBudget = { bytes: 0 };
   const stderrDecoder = new StringDecoder("utf8");
@@ -518,13 +540,23 @@ export async function runJob(job, trigger, options) {
     if (s.length > 0 && transcriptStream && !transcriptWriteError) {
       transcriptStream.write(s);
     }
-    lineBuf = (lineBuf + s).slice(-1048576); // Cap line buffer to 1MB
+    let rest = s;
     let nlIdx;
-    while ((nlIdx = lineBuf.indexOf("\n")) !== -1) {
-      const line = lineBuf.slice(0, nlIdx);
-      lineBuf = lineBuf.slice(nlIdx + 1);
+    // Only the new chunk is scanned for newlines (rescanning the accumulated
+    // line each time is quadratic for a multi-MB line).
+    while ((nlIdx = rest.indexOf("\n")) !== -1) {
+      const piece = rest.slice(0, nlIdx);
+      rest = rest.slice(nlIdx + 1);
+      if (lineOverflow) { lineOverflow = false; lineBuf = ""; continue; }
+      const line = lineBuf + piece;
+      lineBuf = "";
+      if (line.length > MAX_LINE_CHARS) { noteOverflow(line); lineOverflow = false; continue; }
       if (!line.trim()) continue;
       rpc.handleLine(line);
+    }
+    if (rest && !lineOverflow) {
+      lineBuf += rest;
+      if (lineBuf.length > MAX_LINE_CHARS) noteOverflow(lineBuf);
     }
     if (chunk.length > 0) controls.resetIdleTimer();
   });
@@ -537,7 +569,10 @@ export async function runJob(job, trigger, options) {
   // written, so a SIGTERM handler can wait for it before exiting.
   let markFinished;
   const finished = new Promise((r) => { markFinished = r; });
-  const handle = { terminate: () => controls.killChild("terminated"), finished };
+  // A signal arriving after the child exited (stream drain, catalog-lock wait)
+  // must not signal a reaped pid or relabel a clean exit as terminated.
+  let childDone = false;
+  const handle = { terminate: () => { if (!childDone) controls.killChild("terminated"); }, finished };
   liveRuns.add(handle);
   syncSignalHandlers();
 
@@ -552,6 +587,7 @@ export async function runJob(job, trigger, options) {
     const finalize = async (code, signal) => {
       if (finalized) return;
       finalized = true;
+      childDone = true;
       if (drainTimer) { clearTimeout(drainTimer); drainTimer = null; }
       const exitedAt = exitInfo ? exitInfo.at : Date.now();
       // Stop reading: a lingering descendant must not keep the runner alive.
@@ -565,7 +601,8 @@ export async function runJob(job, trigger, options) {
 
       // Flush the decoder and parse a final line lacking a trailing newline.
       lineBuf += stdoutDecoder.end();
-      if (lineBuf.trim()) rpc.handleLine(lineBuf);
+      if (lineBuf.length > MAX_LINE_CHARS) noteOverflow(lineBuf);
+      else if (!lineOverflow && lineBuf.trim()) rpc.handleLine(lineBuf);
       lineBuf = "";
 
       if (transcriptStream) {
@@ -594,7 +631,7 @@ export async function runJob(job, trigger, options) {
         runId, jobId: job.id, triggerKind, startedAt, finishedAt,
         code, signal, spawnErr, killReason, transcriptWriteError,
         stderrBuf, finalText: rpc.getFinalText(), finalError: rpc.getFinalError(), effectiveModel, lastUsage: rpc.getLastUsage(),
-        transcriptPath, transcriptBytes, agent: adapter.id,
+        transcriptPath, transcriptBytes, agent: adapter.id, taskflow: isTaskflow,
       });
 
       try { appendJsonl(runsFile(), record); } catch { /* best effort */ }
@@ -634,6 +671,7 @@ export async function runJob(job, trigger, options) {
     // timers now, give the pipes a short drain window, then finalize.
     child.on("exit", (code, signal) => {
       exitInfo = { code, signal, at: Date.now() };
+      childDone = true;
       controls.onChildExit();
       if (!finalized && !drainTimer) {
         drainTimer = setTimeout(() => finalize(code, signal), drainMs);
@@ -646,7 +684,7 @@ export async function runJob(job, trigger, options) {
 // ─── Runner-level termination (CLI entry only) ──────────────────────────
 // `pi-tick run` as a standalone process must not orphan the detached pi
 // child (and leave a stale active file) when launchd/cron/the user sends the
-// runner SIGTERM/SIGINT. The signal handlers are process-global, so they are
+// runner SIGTERM/SIGINT/SIGHUP/SIGQUIT. The signal handlers are process-global, so they are
 // opt-in: only the CLI entry (pi-tick.mjs) calls enableTerminationHandling().
 // When runJob runs in-process inside the user's pi session (the extension),
 // nothing is enabled and the session's own signal handling is untouched.
@@ -657,23 +695,28 @@ let terminationEnabled = false;
 let terminating = false;
 let installedHandlers = null;
 
+// 128 + signal number. SIGHUP (terminal closed on `run --manual`) and SIGQUIT
+// must also stop the detached child, or it would outlive the runner unlimited.
+const TERMINATION_EXIT_CODES = { SIGHUP: 129, SIGINT: 130, SIGQUIT: 131, SIGTERM: 143 };
+
 function onTerminationSignal(sig) {
   if (terminating) return;
   terminating = true;
   for (const h of [...liveRuns]) h.terminate();
   Promise.all([...liveRuns].map((h) => h.finished)).finally(() => {
-    process.exit(sig === "SIGINT" ? 130 : 143);
+    process.exit(TERMINATION_EXIT_CODES[sig] ?? 143);
   });
 }
 
 function syncSignalHandlers() {
   const want = terminationEnabled && liveRuns.size > 0;
   if (want && !installedHandlers) {
-    installedHandlers = { SIGTERM: () => onTerminationSignal("SIGTERM"), SIGINT: () => onTerminationSignal("SIGINT") };
+    installedHandlers = Object.fromEntries(Object.keys(TERMINATION_EXIT_CODES).map((sig) => [sig, () => onTerminationSignal(sig)]));
     for (const [sig, fn] of Object.entries(installedHandlers)) process.on(sig, fn);
   } else if (!want && installedHandlers) {
     for (const [sig, fn] of Object.entries(installedHandlers)) process.removeListener(sig, fn);
     installedHandlers = null;
+    terminating = false; // every run is done; a later run may be terminated again
   }
 }
 

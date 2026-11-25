@@ -182,6 +182,14 @@ export function findJob(catalog, id) {
   return catalog.jobs.find((j) => j.id === id) || null;
 }
 
+// An existing job whose id equals `id` ignoring case. macOS (APFS) is
+// case-insensitive by default, so `Nightly` and `nightly` would share their
+// plist/log/active-run/transcript paths.
+export function findJobIgnoreCase(catalog, id) {
+  const lower = String(id).toLowerCase();
+  return catalog.jobs.find((j) => String(j.id).toLowerCase() === lower) || null;
+}
+
 // Claim a one-shot job before spawning Pi. The catalog lock makes this
 // compare-and-set safe when cron/launchd delivers duplicate or concurrent
 // invocations. Returning a copy keeps callers from accidentally mutating the
@@ -292,7 +300,12 @@ function tryReapStale(path, staleMs) {
 
 export async function withCatalogLock(fn, opts = {}) {
   ensureDataDirs();
-  const lockPath = catalogLockPath();
+  return withFileLock(catalogLockPath(), fn, opts);
+}
+
+// The same lock scheme for any other file in the data dir (e.g. the cron
+// backend's crontab read-modify-write). `opts.what` names it in the timeout error.
+export async function withFileLock(lockPath, fn, opts = {}) {
   const acquireMs = opts.acquireMs ?? ACQUIRE_TIMEOUT_MS;
   const staleMs = opts.staleMs ?? STALE_LOCK_MS;
   const retryMs = opts.retryMs ?? RETRY_INTERVAL_MS;
@@ -318,7 +331,7 @@ export async function withCatalogLock(fn, opts = {}) {
         if (tryReapStale(lockPath, staleMs)) continue;
       }
       if (Date.now() >= deadline) {
-        throw new PiTickError("could not acquire catalog lock", 1);
+        throw new PiTickError(`could not acquire ${opts.what ?? "catalog"} lock`, 1);
       }
       await sleepAsync(retryMs);
     }

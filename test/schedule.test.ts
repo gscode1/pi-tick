@@ -239,3 +239,28 @@ test("nextFireAt computes expected timestamps for all kinds including old interv
   assert.equal(dWeekly.getHours(), 12);
   assert.equal(dWeekly.getMinutes(), 0);
 });
+
+// ─── DST gap / prototype-key regressions ─────────────────────────────────
+function withTzSync<T>(tz: string, fn: () => T): T {
+  const prev = process.env.TZ;
+  process.env.TZ = tz;
+  try { return fn(); } finally { if (prev === undefined) delete process.env.TZ; else process.env.TZ = prev; }
+}
+
+test("nextFireAt daily 02:30 across a spring-forward gap does not leak 03:30 to later days", async () => {
+  const { previousFireAt } = await import("../extensions/tick/bin/schedule.mjs");
+  withTzSync("America/New_York", () => {
+    const daily = { kind: "daily", value: { time: "02:30" } };
+    // 2026-03-08 04:22 EDT; 02:30 does not exist today, so next is 03-09 02:30 EDT = 06:30Z.
+    assert.equal(nextFireAt(daily, new Date("2026-03-08T08:22:00Z")), "2026-03-09T06:30:00.000Z");
+    // 2026-03-08 03:10 EDT; previous real 02:30 is 03-07 02:30 EST = 07:30Z.
+    assert.equal(previousFireAt(daily, new Date("2026-03-08T07:10:00Z")).at, "2026-03-07T07:30:00.000Z");
+    const weekly = { kind: "weekly", value: { days: ["monday"], time: "02:30" } };
+    assert.equal(nextFireAt(weekly, new Date("2026-03-08T08:22:00Z")), "2026-03-09T06:30:00.000Z");
+  });
+});
+
+test("validateDays rejects prototype keys", () => {
+  assert.throws(() => validateDays(["constructor"]), /invalid --day/);
+  assert.throws(() => validateDays(["__proto__"]), /invalid --day/);
+});

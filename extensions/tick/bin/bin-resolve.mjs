@@ -24,6 +24,17 @@ export function which(bin) {
   return null;
 }
 
+function compareVersionsDesc(a, b) {
+  const pa = a.replace(/^v/, "").split(/[.\-]/).map((x) => parseInt(x, 10));
+  const pb = b.replace(/^v/, "").split(/[.\-]/).map((x) => parseInt(x, 10));
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const x = Number.isNaN(pa[i]) || pa[i] === undefined ? -1 : pa[i];
+    const y = Number.isNaN(pb[i]) || pb[i] === undefined ? -1 : pb[i];
+    if (x !== y) return y - x;
+  }
+  return 0;
+}
+
 export function resolveNodePath() {
   const fromPath = which("node");
   if (fromPath) return fromPath;
@@ -44,7 +55,8 @@ export function resolveNodePath() {
     try {
       const s = statSync(f);
       if (s.isDirectory()) {
-        const subs = readdirSync(f);
+        // Highest version first (numeric semver compare, e.g. v22.10 > v22.9).
+        const subs = readdirSync(f).sort((a, b) => compareVersionsDesc(a, b));
         for (const sub of subs) {
           const cand = join(f, sub, "bin", "node");
           try {

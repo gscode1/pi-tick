@@ -1,7 +1,7 @@
 // validate.mjs — job-field validation, shared by every subcommand that
 // touches a job id, prompt, or cwd.
 
-import { statSync } from "node:fs";
+import { statSync, accessSync, constants as fsConstants } from "node:fs";
 import { isAbsolute } from "node:path";
 import { fail } from "./errors.mjs";
 
@@ -21,6 +21,19 @@ export function validatePrompt(prompt) {
   const bytes = Buffer.byteLength(prompt, "utf8");
   if (bytes > MAX_PROMPT_BYTES) {
     fail(`prompt is ${bytes} bytes; maximum is ${MAX_PROMPT_BYTES}`, 2);
+  }
+}
+
+// The callback only runs after a job fires, so catch a typo or a missing
+// chmod +x at add/enable time instead of in logs/<id>.callback.log hours later.
+export function validateExecutable(path) {
+  let st;
+  try { st = statSync(path); } catch {
+    fail(`--on-complete: ${path} does not exist`, 2);
+  }
+  if (!st.isFile()) fail(`--on-complete: ${path} is not a file`, 2);
+  try { accessSync(path, fsConstants.X_OK); } catch {
+    fail(`--on-complete: ${path} is not executable`, 2);
   }
 }
 

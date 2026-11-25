@@ -14,6 +14,7 @@ export const BOOLEAN_FLAGS = new Set([
   "failed", // log
   "json", // list
   "raw", // show
+  "fix", // doctor
   "no-meta", // show
   "help",
 ]);

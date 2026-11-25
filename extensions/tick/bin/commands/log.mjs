@@ -25,7 +25,7 @@ export function cmdLog(argv, { stdout = process.stdout, stderr = process.stderr 
   const pos = flags._;
   const id = pos[0] || null;
   const limit = flags.limit === undefined || flags.limit === true ? 10 : Number(flags.limit);
-  if (!Number.isFinite(limit) || limit < 0) fail(`--limit must be a non-negative number (got '${flags.limit}')`, 2);
+  if (!Number.isInteger(limit) || limit < 0) fail(`--limit must be a non-negative integer (got '${flags.limit}')`, 2);
   const onlyFailed = flags.failed === true || flags.failed === "true";
   let sinceMs = null;
   if (flags.since !== undefined) {
@@ -41,7 +41,11 @@ export function cmdLog(argv, { stdout = process.stdout, stderr = process.stderr 
 
   // Tail by reading backwards in 64KB chunks and counting newlines.
   // Over-fetch so post-filters still have enough to fill --limit.
-  const overFetch = Math.max(limit * 5 + 1000, (sinceMs != null ? 5000 : 0));
+  // With an id or --failed filter the matches can be arbitrarily far back, so
+  // scan the whole history (current + rotated file).
+  const overFetch = id !== null || onlyFailed || limit === 0
+    ? Infinity
+    : Math.max(limit * 5 + 1000, (sinceMs != null ? 5000 : 0));
   const all = tailRunLines(overFetch);
   const records = [];
   for (const line of all) {
@@ -60,7 +64,8 @@ export function cmdLog(argv, { stdout = process.stdout, stderr = process.stderr 
     }
   }
   // Take last N.
-  const tail = records.slice(-limit);
+  // --limit 0 means all (documented in the README).
+  const tail = limit === 0 ? records : records.slice(-limit);
 
   if (tail.length === 0) {
     // Distinguish "no runs at all" from "no runs match filters" so the

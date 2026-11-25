@@ -25,6 +25,11 @@
 //    start time (older versions, or `ps` unavailable) fall back to pid-only.
 //  - A run is live only when the runner pid is alive AND the child (or, if
 //    the child leader is gone, its process group) is alive.
+//  - Exception: if the runner died (crash, SIGKILL) but the child — verified by
+//    pid + recorded start time — is still running, the record is returned with
+//    `orphaned: true`, so `kill` and the overlap check still target it. When an
+//    orphan's record is finally found dead it is removed and an `orphaned` run
+//    record is appended to runs.jsonl (the runner never wrote one).
 //  - The `ps`-scan fallback that guessed "running" from command lines was
 //    removed: it matched by prefix (`backup` vs `backup-daily`) and even
 //    unrelated processes. The active file is the single source of truth.
@@ -35,8 +40,8 @@
 import { readFileSync, existsSync, unlinkSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
-import { dataDir } from "./paths.mjs";
-import { writeAtomic } from "./catalog.mjs";
+import { dataDir, runsFile } from "./paths.mjs";
+import { writeAtomic, appendJsonl, ensureFileMode } from "./catalog.mjs";
 
 export function activeRunsDir() {
   return join(dataDir(), "active");
@@ -122,17 +127,41 @@ function removeActiveFiles(jobId, runId) {
   if (runId) { try { unlinkSync(killMarkerPath(jobId, runId)); } catch { /* best effort */ } }
 }
 
+// A run whose runner died without writing a run record: log it as `orphaned`.
+function recordOrphan(rec) {
+  try {
+    const now = new Date().toISOString();
+    appendJsonl(runsFile(), {
+      runId: rec.runId, jobId: rec.jobId, triggerKind: rec.triggerKind || "external",
+      startedAt: rec.startedAt || now, finishedAt: now, exitCode: 1, reason: "orphaned",
+      error: "runner exited without recording the run", model: null,
+    });
+    ensureFileMode(runsFile(), 0o600);
+  } catch { /* best effort */ }
+}
+
 // The raw record when the runner that wrote it is still the same live
-// process (child state NOT checked); stale/corrupt files are removed.
+// process (child state NOT checked), or — flagged `orphaned` — when the runner
+// is gone but its child is verifiably still running; stale/corrupt files are
+// removed (a dead runner's record is logged as `orphaned` in runs.jsonl).
 function readOwnedRecord(jobId) {
   const p = activeRunPath(jobId);
   if (!existsSync(p)) return null;
   let rec = null;
   try {
     rec = JSON.parse(readFileSync(p, "utf8"));
-    if (rec && rec.jobId === jobId && pidMatches(rec.pid, rec.pidStart)) return rec;
+    if (rec && rec.jobId === jobId) {
+      if (pidMatches(rec.pid, rec.pidStart)) return rec;
+      // Only trust an orphaned child whose start time was recorded (and, in
+      // childState, matches): never signal a recycled pid.
+      if (rec.childStart && childState(rec).alive) return { ...rec, orphaned: true };
+    }
   } catch { /* stale/corrupt */ }
+  // Whoever removes the file logs the orphan, so concurrent readers don't both.
+  let removed = false;
+  try { unlinkSync(p); removed = true; } catch { /* already gone */ }
   removeActiveFiles(jobId, rec && rec.runId);
+  if (removed && rec && rec.jobId === jobId && rec.runId) recordOrphan(rec);
   return null;
 }
 
@@ -194,7 +223,15 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // group, then — after `graceMs` — SIGKILL to the group if ANYTHING in it is
 // still alive (the leader may be gone while a TERM-ignoring descendant
 // lingers). Returns quickly if nothing is alive any more.
-export async function killActiveRun(jobId, { graceMs = 5000, pollMs = 100 } = {}) {
+export async function killActiveRun(jobId, opts) {
+  const res = await killTree(jobId, opts);
+  // An orphaned run (its runner died) has no one to clean up after it: once its
+  // child is dead this removes the record and logs the run as `orphaned`.
+  if (res.ok) readOwnedRecord(jobId);
+  return res;
+}
+
+async function killTree(jobId, { graceMs = 5000, pollMs = 100 } = {}) {
   const rec = readActiveRun(jobId);
   if (!rec) {
     // Runner finalizing with a dead child, or no run at all.
@@ -211,8 +248,8 @@ export async function killActiveRun(jobId, { graceMs = 5000, pollMs = 100 } = {}
 
   const treeAlive = () => isPidAlive(pid) || isGroupAlive(pid);
   if (!treeAlive()) {
-    clearActiveRun(jobId, rec.runId);
-    return { ok: true, pid, alreadyDead: true };
+    if (!rec.orphaned) clearActiveRun(jobId, rec.runId); // an orphan is reaped (and logged) by killActiveRun
+    return { ok: true, pid, alreadyDead: true, ...(rec.orphaned && { orphaned: true }) };
   }
 
   // Flag the run as user-killed BEFORE signalling: the runner reads the
@@ -237,7 +274,7 @@ export async function killActiveRun(jobId, { graceMs = 5000, pollMs = 100 } = {}
   const deadline = Date.now() + graceMs;
   while (Date.now() < deadline) {
     await sleep(pollMs);
-    if (!treeAlive()) return { ok: true, pid, signal: "SIGTERM" };
+    if (!treeAlive()) return { ok: true, pid, signal: "SIGTERM", ...(rec.orphaned && { orphaned: true }) };
   }
   if (treeAlive()) {
     signalProcessTree(pid, "SIGKILL");
@@ -248,7 +285,7 @@ export async function killActiveRun(jobId, { graceMs = 5000, pollMs = 100 } = {}
     while (treeAlive() && Date.now() < killDeadline) {
       await sleep(pollMs);
     }
-    return { ok: true, pid, signal: "SIGKILL" };
+    return { ok: true, pid, signal: "SIGKILL", ...(rec.orphaned && { orphaned: true }) };
   }
-  return { ok: true, pid, signal: "SIGTERM" };
+  return { ok: true, pid, signal: "SIGTERM", ...(rec.orphaned && { orphaned: true }) };
 }

@@ -28,7 +28,8 @@ import {
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 
-import { logsDir as defaultLogsDir } from "../paths.mjs";
+import { logsDir as defaultLogsDir, dataDir } from "../paths.mjs";
+import { withFileLock } from "../catalog.mjs";
 import { resolveScheduleFields, intervalCalendarForm, CALENDAR_INTERVAL_HINT } from "../schedule.mjs";
 
 // Cron weekday numbering is identical to launchd: Sun=0..Sat=6. Schedule
@@ -104,7 +105,14 @@ export function buildCronLine(job, opts) {
   // We intentionally invoke pi-tick.mjs via the node binary: cron
   // has no shebang-resolution guarantee.
   // StandardOutPath equivalent: append stdout+stderr to per-job log.
-  const cmd = `${quote(opts.nodePath)} ${quote(opts.cliPath)} run ${quote(job.id)} >> ${quote(outLog)} 2>> ${quote(errLog)}`;
+  // PI_TICK_* overrides set at enable time (see enable.mjs) are baked in as a
+  // `VAR='value'` prefix, since cron's env has none of them. A value holding a
+  // newline cannot live on a single crontab line, so it is dropped.
+  const envPrefix = Object.entries(opts.envVars || {})
+    .filter(([, v]) => v !== undefined && v !== "" && !/[\r\n\0]/.test(String(v)))
+    .map(([k, v]) => `${k}=${quote(v)} `)
+    .join("");
+  const cmd = `${envPrefix}${quote(opts.nodePath)} ${quote(opts.cliPath)} run ${quote(job.id)} >> ${quote(outLog)} 2>> ${quote(errLog)}`;
   const line = `${schedule} ${cmd}`;
   return { line };
 }
@@ -122,16 +130,12 @@ export function fingerprint(text) {
   return createHash("sha256").update(text).digest("hex").slice(0, 16);
 }
 
-// The first two single-quoted words of a cron command (node, CLI), undoing
-// quote()'s escaping. Returns nulls for a hand-edited line we can't parse.
+// The node and CLI paths of a cron command (`[VAR='v' ...] 'node' 'cli' run`),
+// undoing quote()'s escaping. Returns nulls for a hand-edited line we can't parse.
 export function parseCronPaths(line) {
-  const words = [];
-  const re = /'((?:[^']|'\\'')*)'/g;
-  let m;
-  while (words.length < 2 && (m = re.exec(line))) {
-    words.push(m[1].replace(/'\\''/g, "'").replace(/\\%/g, "%"));
-  }
-  return { nodePath: words[0] ?? null, cliPath: words[1] ?? null, cwd: null };
+  const m = line.match(/'((?:[^']|'\\'')*)' '((?:[^']|'\\'')*)' run\b/);
+  const unq = (w) => w.replace(/'\\''/g, "'").replace(/\\%/g, "%");
+  return { nodePath: m ? unq(m[1]) : null, cliPath: m ? unq(m[2]) : null, cwd: null };
 }
 
 function readCrontab() {
@@ -144,6 +148,14 @@ function readCrontab() {
     return "";
   }
   return null; // real error
+}
+
+// register/unregister read-modify-write the whole crontab, so concurrent
+// invocations (e.g. two `enable`s) would lose each other's edits. Serialize
+// them with a lock file in the data dir (same scheme as the catalog lock).
+function withCrontabLock(fn) {
+  mkdirSync(dataDir(), { recursive: true, mode: 0o700 });
+  return withFileLock(join(dataDir(), "crontab.lock"), fn, { what: "crontab" });
 }
 
 function writeCrontab(content) {
@@ -180,7 +192,7 @@ function extractEntries(crontabText, jobId) {
   const ours = [];
   const theirs = [];
   for (let i = 0; i < lines.length; i++) {
-    if (lines[i] === `${COMMENT_PREFIX}${jobId}`) {
+    if (lines[i].trimEnd() === `${COMMENT_PREFIX}${jobId}`) {
       ours.push(lines[i]);
       // Consume the following line only if it is our command for this id; if
       // the user edited or removed it, drop just the marker and keep their line.
@@ -222,23 +234,25 @@ export const cronBackend = {
   register: async (job, opts) => {
     const built = buildCronLine(job, opts);
     if (built.error) return { ok: false, error: built.error };
-    const current = readCrontab();
-    if (current === null) {
-      return { ok: false, error: "failed to read crontab (is `crontab` installed and on PATH?)" };
-    }
-    const { ours, theirs } = extractEntries(current, job.id);
-    const newBlock = `${COMMENT_PREFIX}${job.id}\n${built.line}`;
-    // theirs has no trailing newline; append "\n" only when there's at
-    // least one surviving line so we don't write a stray blank line.
-    const updated = theirs.join("\n") + (theirs.length ? "\n" : "") + newBlock + "\n";
-    // Same fallback as buildCronLine: opts.logsDir may be a function, a
-    // string, or absent entirely (issue #57 — `register({})` used to throw
-    // because mkdirSync(undefined, ...) is a TypeError).
-    const logsPath = typeof opts.logsDir === "function" ? opts.logsDir() : (opts.logsDir || defaultLogsDir());
-    mkdirSync(logsPath, { recursive: true, mode: 0o700 });
-    const w = await writeCrontab(updated);
-    if (!w.ok) return { ok: false, error: w.error };
-    return { ok: true, referencePath: `crontab (entry: ${built.line.slice(0, 60)}...)`, fingerprint: fingerprint(built.line) };
+    return withCrontabLock(async () => {
+      const current = readCrontab();
+      if (current === null) {
+        return { ok: false, error: "failed to read crontab (is `crontab` installed and on PATH?)" };
+      }
+      const { theirs } = extractEntries(current, job.id);
+      const newBlock = `${COMMENT_PREFIX}${job.id}\n${built.line}`;
+      // theirs has no trailing newline; append "\n" only when there's at
+      // least one surviving line so we don't write a stray blank line.
+      const updated = theirs.join("\n") + (theirs.length ? "\n" : "") + newBlock + "\n";
+      // Same fallback as buildCronLine: opts.logsDir may be a function, a
+      // string, or absent entirely (issue #57 — `register({})` used to throw
+      // because mkdirSync(undefined, ...) is a TypeError).
+      const logsPath = typeof opts.logsDir === "function" ? opts.logsDir() : (opts.logsDir || defaultLogsDir());
+      mkdirSync(logsPath, { recursive: true, mode: 0o700 });
+      const w = await writeCrontab(updated);
+      if (!w.ok) return { ok: false, error: w.error };
+      return { ok: true, referencePath: `crontab (entry: ${built.line.slice(0, 60)}...)`, fingerprint: fingerprint(built.line) };
+    });
   },
   // Read-only, and synchronous (unlike the rest of the port) so `list` can
   // stay synchronous. cron has no separate "loaded" state.
@@ -246,20 +260,19 @@ export const cronBackend = {
     const text = readCrontab();
     if (text === null) return { registered: false, loaded: null, fingerprint: null, paths: null, error: "failed to read crontab" };
     const lines = text.split("\n");
-    const i = lines.indexOf(`${COMMENT_PREFIX}${jobId}`);
+    const i = lines.findIndex((l) => l.trimEnd() === `${COMMENT_PREFIX}${jobId}`);
     if (i < 0 || i + 1 >= lines.length || !isOurCommand(lines[i + 1], jobId)) {
       return { registered: false, loaded: null, fingerprint: null, paths: null };
     }
     const line = lines[i + 1];
     return { registered: true, loaded: true, fingerprint: fingerprint(line), paths: parseCronPaths(line) };
   },
-  unregister: async (jobId) => {
+  unregister: async (jobId) => withCrontabLock(async () => {
     const current = readCrontab();
     if (current === null) return { ok: false, error: "failed to read crontab" };
-    const { theirs } = extractEntries(current, jobId);
-    if (theirs.length === 0 && current.trim().length === 0) {
-      return { ok: true, referencePath: "crontab (no entry to remove)" };
-    }
+    const { ours, theirs } = extractEntries(current, jobId);
+    // Nothing of ours to remove: leave the user's crontab untouched.
+    if (ours === null) return { ok: true, referencePath: "crontab (no entry to remove)" };
     // theirs already has the trailing empty line popped; join with "\n".
     // If everything else is empty, write a single trailing newline so
     // crontab doesn't choke on a totally empty file.
@@ -267,7 +280,7 @@ export const cronBackend = {
     const w = await writeCrontab(finalContent);
     if (!w.ok) return { ok: false, error: w.error };
     return { ok: true, referencePath: "crontab (entry removed)" };
-  },
+  }),
   unregisterAndDelete: async (jobId) => {
     // Same as unregister: removal from crontab IS the delete.
     return cronBackend.unregister(jobId);

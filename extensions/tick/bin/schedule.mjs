@@ -67,7 +67,7 @@ export function validateDays(days) {
   }
   for (const d of days) {
     const lower = String(d).toLowerCase();
-    if (!(lower in WEEKDAY_TO_INT)) {
+    if (!Object.hasOwn(WEEKDAY_TO_INT, lower)) {
       fail(`invalid --day '${d}': must be one of ${WEEKDAYS.concat(WEEKDAY_SHORT).join(", ")}`, 2);
     }
   }
@@ -247,7 +247,11 @@ function nextDailyAt(now, hhmm) {
   const next = new Date(now);
   next.setHours(h, m, 0, 0);
   if (next.getTime() <= now.getTime()) {
+    // Move the day first, then set the time: a DST gap on `now`'s day must not
+    // leak its shifted hour onto other days.
+    next.setTime(now.getTime());
     next.setDate(next.getDate() + 1);
+    next.setHours(h, m, 0, 0);
   }
   return next.toISOString();
 }
@@ -260,10 +264,11 @@ function nextWeeklyAt(now, days, hhmm) {
     const target = WEEKDAY_TO_INT[d];
     let diff = (target - nowDow + 7) % 7;
     const cand = new Date(now);
-    cand.setHours(h, m, 0, 0);
     cand.setDate(cand.getDate() + diff);
+    cand.setHours(h, m, 0, 0);
     if (cand.getTime() <= now.getTime()) {
       cand.setDate(cand.getDate() + 7);
+      cand.setHours(h, m, 0, 0);
     }
     if (best === null || cand.getTime() < best.getTime()) best = cand;
   }
@@ -321,7 +326,11 @@ function prevDailyAt(now, hhmm) {
   const [h, m] = hhmm.split(":").map(Number);
   const prev = new Date(now);
   prev.setHours(h, m, 0, 0);
-  if (prev.getTime() > now.getTime()) prev.setDate(prev.getDate() - 1);
+  if (prev.getTime() > now.getTime()) {
+    prev.setTime(now.getTime());
+    prev.setDate(prev.getDate() - 1);
+    prev.setHours(h, m, 0, 0);
+  }
   return prev.toISOString();
 }
 
@@ -331,9 +340,12 @@ function prevWeeklyAt(now, days, hhmm) {
   for (const d of days) {
     const target = WEEKDAY_TO_INT[d];
     const cand = new Date(now);
-    cand.setHours(h, m, 0, 0);
     cand.setDate(cand.getDate() - ((now.getDay() - target + 7) % 7));
-    if (cand.getTime() > now.getTime()) cand.setDate(cand.getDate() - 7);
+    cand.setHours(h, m, 0, 0);
+    if (cand.getTime() > now.getTime()) {
+      cand.setDate(cand.getDate() - 7);
+      cand.setHours(h, m, 0, 0);
+    }
     if (best === null || cand.getTime() > best.getTime()) best = cand;
   }
   return best ? best.toISOString() : null;

@@ -1369,7 +1369,7 @@ test("cmdRun treats taskflow failure text as a failed run", async () => {
       await withEnv(env, () => {
         const cat = catMod.loadCatalog();
         cat.jobs.push({
-          id: "tf", prompt: "p", cwd: dir,
+          id: "tf", prompt: "/tf:dev-pr-review", cwd: dir,
           schedule: { kind: "interval", value: { minutes: 1, seconds: 0 } },
           enabled: true, model: null, piPath: piStub,
           createdAt: "x", updatedAt: "x", lastRun: null,
@@ -2645,6 +2645,85 @@ test("corrupt config.json: `config get` reports the problem, `config set` repair
       );
       assert.equal(await withEnv(env, () => cmdConfig(["set", "default-model", "m1"], c.io)), 0);
       assert.equal(await withEnv(env, () => loadConfig().defaultModel), "m1");
+    } finally { teardownEnv(env); }
+  });
+});
+
+test("config get rejects prototype keys instead of crashing", async () => {
+  await withTempDir(async (dir) => {
+    const env = setupEnv({ dataDir: dir, plistDir: join(dir, "agents") });
+    try {
+      const c = captureIO();
+      await assert.rejects(withEnv(env, () => cmdConfig(["get", "constructor"], c.io)), /unknown config key|invalid|unknown/i);
+    } finally { teardownEnv(env); }
+  });
+});
+
+test("doctor --fix <id> keeps the id positional", () => {
+  assert.ok(BOOLEAN_FLAGS.has("fix"));
+  const r = parseFlags(["--fix", "job1"]);
+  assert.equal(r.fix, true);
+  assert.deepEqual(r._, ["job1"]);
+});
+
+test("cmdLog: --limit 0 means all, non-integer is rejected, old id matches are found", async () => {
+  await withTempDir(async (dir) => {
+    const env = setupEnv({ dataDir: dir, plistDir: join(dir, "agents") });
+    try {
+      const rec = (jobId: string, n: number) => JSON.stringify({
+        jobId, runId: `r-${jobId}-${n}`, startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(), exitCode: 0,
+      });
+      const lines = [rec("old", 0)];
+      for (let i = 0; i < 3000; i++) lines.push(rec("busy", i));
+      writeFileSync(join(dir, "runs.jsonl"), lines.join("\n") + "\n");
+      const { cmdLog } = await import("../extensions/tick/bin/commands/log.mjs");
+      const a = captureIO();
+      await withEnv(env, () => cmdLog(["--limit", "0"], a.io));
+      assert.match(a.o.out, /r-old-0/);
+      await assert.rejects(withEnv(env, () => cmdLog(["--limit", "1.5"], captureIO().io)), /non-negative integer/);
+      const b = captureIO();
+      await withEnv(env, () => cmdLog(["old"], b.io));
+      assert.match(b.o.out, /r-old-0/);
+    } finally { teardownEnv(env); }
+  });
+});
+
+test("cmdTranscripts: fractional limit rejected; --limit 0 is not 'none'", async () => {
+  await withTempDir(async (dir) => {
+    const env = setupEnv({ dataDir: dir, plistDir: join(dir, "agents") });
+    try {
+      const { cmdTranscripts } = await import("../extensions/tick/bin/commands/transcripts.mjs");
+      const { transcriptJobDir } = await import("../extensions/tick/bin/catalog.mjs");
+      await withEnv(env, () => {
+        const d = transcriptJobDir("tj");
+        mkdirSync(d, { recursive: true, mode: 0o700 });
+        writeFileSync(join(d, "2026-01-01T00-00-00-000Z_abcd1234.jsonl"), "x\n");
+      });
+      const a = captureIO();
+      await withEnv(env, () => cmdTranscripts(["tj", "--limit", "0"], a.io));
+      assert.doesNotMatch(a.o.out, /no transcripts/);
+      await assert.rejects(withEnv(env, () => cmdTranscripts(["tj", "--limit", "2.5"], captureIO().io)), /non-negative integer/);
+    } finally { teardownEnv(env); }
+  });
+});
+
+test("cmdShow renders command-job output verbatim even when the run record is missing", async () => {
+  await withTempDir(async (dir) => {
+    const env = setupEnv({ dataDir: dir, plistDir: join(dir, "agents") });
+    try {
+      const { cmdShow } = await import("../extensions/tick/bin/commands/show.mjs");
+      const catMod = await import("../extensions/tick/bin/catalog.mjs");
+      const { transcriptJobDir } = catMod;
+      await withEnv(env, async () => {
+        await cmdAdd(["cj", "--prompt", "true", "--agent", "command", "--cwd", "/tmp", "--kind", "daily", "--time", "09:00"], captureIO().io);
+        const d = transcriptJobDir("cj");
+        mkdirSync(d, { recursive: true, mode: 0o700 });
+        writeFileSync(join(d, "2026-01-01T00-00-00-000Z_abcd1234.jsonl"), "hello plain output\n");
+      });
+      const c = captureIO();
+      await withEnv(env, () => cmdShow(["cj", "--no-meta"], c.io));
+      assert.match(c.o.out, /hello plain output/);
+      assert.doesNotMatch(c.o.out, /no renderable content/);
     } finally { teardownEnv(env); }
   });
 });

@@ -20,7 +20,7 @@ export function cmdConfig(argv, { stdout = process.stdout, stderr = process.stde
   if (pos.length < 1) fail(`config requires a subcommand: set|get|unset`, 2);
   const sub = pos[0];
   const key = pos[1];
-  if (!key || !(key in CONFIG_KEYS)) {
+  if (!key || !Object.hasOwn(CONFIG_KEYS, key)) {
     fail(`config: unknown or missing key '${key ?? ""}'; supported: ${Object.keys(CONFIG_KEYS).join(", ")}`, 2);
   }
   const entry = CONFIG_KEYS[key];

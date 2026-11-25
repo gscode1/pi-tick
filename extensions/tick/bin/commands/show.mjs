@@ -2,6 +2,7 @@
 
 import { parseFlags } from "../argv.mjs";
 import { fail } from "../errors.mjs";
+import { findJob, loadCatalog } from "../catalog.mjs";
 import { validateId } from "../validate.mjs";
 import { readTail, compareNewestFirst } from "../format.mjs";
 import {
@@ -115,7 +116,8 @@ export function cmdShow(argv, { stdout = process.stdout, stderr = process.stderr
 
   // Command jobs store plain script output (which may itself be JSON
   // lines), not agent events: show it verbatim.
-  const body = rec?.agent === "command"
+  const agent = rec?.agent ?? findJob(loadCatalog(), id)?.agent;
+  const body = agent === "command"
     ? lineSource.filter((l) => l.trim()).join("\n")
     : prettyPrintTranscript(viewEvents);
   if (body.length === 0) {
