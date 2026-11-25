@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-25
+
 ### Added
 - `pi-tick add --isolate worktree --base <ref> [--worktree-dir <abs path>] [--setup '<shell cmd>'] [--setup-timeout SECONDS]`: every run gets a fresh detached git worktree of `--base`, runs the agent there (`PI_TICK_WORKTREE` and `PI_TICK_SOURCE_CWD` in its, `--setup`'s and `--on-complete`'s environment), then commits what changed (`git add -A`, `--no-verify`, as `pi-tick`) to branch `tick/<jobId>/<runId>` whatever the outcome (failure, timeout, kill included) and removes the worktree. No changes, no branch. The run record gains `isolate`, `baseRef`, `baseSha`, `branch`, `diffstat` (and `worktreeError`), so `--on-complete` receives the branch. A worktree that cannot be created is `worktree_failed`, a failing `--setup` (300s default limit) is `setup_failed`; neither starts the agent. Files `--setup` leaves untracked (a copied `.env`, `node_modules`) are not committed. The `--when` guard runs first, in `cwd`, so skipped runs cost nothing. `tick/*` branches are never deleted by pi-tick. CLI-only (#67).
 - Worktree root: `--worktree-dir`, else `pi-tick config set worktree-dir <abs path>`, else `<dataDir>/worktrees`; the runner appends `<jobId>/<runId>`.
@@ -20,6 +22,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `pi-tick list` shows `stale` or `overdue` for enabled jobs doctor would flag.
 - On `session_start`, the extension shows one notice when tick jobs need attention.
 - `enable` records what it registered (`registration` in `jobs.json`), and both backends gain a read-only `status(id)`.
+
+### Fixed
+- Runner: the SIGTERM/SIGINT handlers now stay installed for the whole run, so a termination between phases is recorded as `terminated` instead of killing the runner without a record (#70). SIGHUP/SIGQUIT also terminate and record the run, and a late SIGTERM no longer relabels a cleanly exited run as `terminated`.
+- Runner: stdout lines over 1 MB no longer lose `agent_end` (RPC slash-command jobs hung until the wall timeout); false taskflow-failure detection on successful runs; `/tf` quoted arguments with spaces and multi-line prompts. A runner that dies with a live child leaves the run tracked (orphaned), so `kill` and overlap checks still work (#68).
+- Backends: a failed launchd re-register restores the previous plist; `enable` on an enabled job and `doctor --fix` skip jobs with an active run; `enable` re-validates `cwd` and `--on-complete`; `PI_TICK_*` overrides are baked into the plist/crontab line; cron crontab edits are serialized and `delete` always unregisters; ids differing only by case are rejected (#68).
+- CLI and schedule: daily/weekly next/previous fire no longer leaks a DST shift to other days (wrong `list` times, false `doctor` overdue); `doctor --fix <id>` keeps the id; `log <id>`/`--failed` scan the full history and `--limit` must be an integer; prototype keys such as `--days constructor` are rejected; `show` falls back to the catalog agent; the mise node fallback picks the highest version (#68).
 
 ### Docs
 - README brought up to date with 0.2.x: agent adapters, `kill`, `show --run-id`, `add` runtime-limit/`--agent`/`--on-complete` flags, `tick_create` runtime args, run `reason` values, token-limit failures on pi 1.1+, log rotation, test count.
