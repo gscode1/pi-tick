@@ -14,11 +14,11 @@ export function cmdTranscripts(argv, { stdout = process.stdout, stderr = process
   const id = pos[0];
   validateId(id);
   const limit = flags.limit === undefined || flags.limit === true ? 20 : Number(flags.limit);
-  if (!Number.isFinite(limit) || limit < 0) fail(`--limit must be a non-negative number (got '${flags.limit}')`, 2);
+  if (!Number.isInteger(limit) || limit < 0) fail(`--limit must be a non-negative integer (got '${flags.limit}')`, 2);
 
   const files = listTranscriptFiles(id)
     .sort(compareNewestFirst)
-    .slice(0, limit);
+    .slice(0, limit === 0 ? undefined : limit); // --limit 0 = all, as for `log`
 
   if (files.length === 0) {
     stdout.write(`(no transcripts for job '${id}')\n`);

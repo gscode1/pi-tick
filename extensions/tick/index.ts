@@ -479,6 +479,7 @@ export default function (pi: ExtensionAPI): void {
         return {
           content: [{ type: "text", text: `tick_create failed: ${msg}` }],
           isError: true,
+          details: {},
         };
       }
     },
@@ -497,6 +498,7 @@ export default function (pi: ExtensionAPI): void {
         return {
           content: [{ type: "text", text: `tick_list failed: ${(res.stderr || "").trim() || `exit ${res.code}`}` }],
           isError: true,
+          details: {},
         };
       }
       return {
@@ -522,6 +524,7 @@ export default function (pi: ExtensionAPI): void {
         return {
           content: [{ type: "text", text: `tick_delete failed: ${(res.stderr || res.stdout || `exit ${res.code}`).trim()}` }],
           isError: true,
+          details: {},
         };
       }
       return {

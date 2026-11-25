@@ -3,13 +3,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { join, delimiter } from "node:path";
-import { copyFileSync, chmodSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, existsSync } from "node:fs";
+import { copyFileSync, chmodSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, existsSync, rmSync } from "node:fs";
 import { diagnoseJob, cmdDoctor } from "../extensions/tick/bin/commands/doctor.mjs";
 import { cmdList } from "../extensions/tick/bin/commands/list.mjs";
 import { cmdAdd } from "../extensions/tick/bin/commands/add.mjs";
+import { cmdEnable } from "../extensions/tick/bin/commands/enable.mjs";
+import { writeActiveRun, clearActiveRun } from "../extensions/tick/bin/run-registry.mjs";
 import { previousFireAt } from "../extensions/tick/bin/schedule.mjs";
 import { cronBackend, buildCronLine, parseCronPaths } from "../extensions/tick/bin/backends/cron.mjs";
-import { renderPlist, parsePlistPaths } from "../extensions/tick/bin/backends/launchd.mjs";
+import { renderPlist, parsePlistPaths, launchdBackend } from "../extensions/tick/bin/backends/launchd.mjs";
 import { withTempDir, setupEnv, withEnv, teardownEnv, writeStub } from "./_helpers.ts";
 
 function capture() {
@@ -277,6 +279,174 @@ test("doctor <id> on an unknown job exits 4", async () => {
     const env = setupEnv({ dataDir: dir, plistDir: join(dir, "agents") });
     try {
       await assert.rejects(withEnv(env, () => cmdDoctor(["nope"], { stdout: capture().stream, stderr: capture().stream })), (e: any) => e.code === 4);
+    } finally {
+      teardownEnv(env);
+    }
+  });
+});
+
+// ─── Re-registration safety, validation, env propagation (launchd) ──────
+
+// A launchctl stub that logs every call and, while a `fail-bootstrap` flag
+// file exists, fails `bootstrap` of any plist scheduled at minute 30.
+function launchctlLogStub(env: ReturnType<typeof setupEnv>, dir: string) {
+  const log = join(dir, "launchctl.log");
+  const flag = join(dir, "fail-bootstrap");
+  writeStub(env, "launchctl", `echo "$1" >> '${log}'
+if [ "$1" = bootstrap ] && [ -f '${flag}' ] && grep -q '<integer>30</integer>' "$3"; then echo "Bootstrap failed: 5: Input/output error" >&2; exit 5; fi
+exit 0`);
+  const calls = (verb: string) => (existsSync(log) ? readFileSync(log, "utf8").split("\n").filter((l) => l === verb).length : 0);
+  return { flag, calls };
+}
+
+function seedCli(dir: string) {
+  copyFileSync(new URL("../extensions/tick/bin/pi-tick.mjs", import.meta.url).pathname, join(dir, "pi-tick.mjs"));
+  chmodSync(join(dir, "pi-tick.mjs"), 0o755);
+}
+
+const ADD_DAILY = (id: string, extra: string[] = []) =>
+  [id, "--prompt", "true", "--agent", "command", "--cwd", "/tmp", "--kind", "daily", "--time", "09:00", ...extra];
+
+test("launchd register: a failed bootstrap restores the previous plist and reloads it (re-register of an enabled job)", async () => {
+  await withTempDir(async (dir) => {
+    const plistDir = join(dir, "agents");
+    const env = setupEnv({ dataDir: dir, plistDir });
+    const lc = launchctlLogStub(env, dir);
+    try {
+      const job = (time: string) => ({ id: "keep", cwd: "/tmp", schedule: { kind: "daily", value: { time } } });
+      const opts = { nodePath: "/usr/bin/node", cliPath: "/opt/pi-tick.mjs", logsDir: join(dir, "logs") };
+      const pp = join(plistDir, "dev.pi.tick.keep.plist");
+      await withEnv(env, async () => {
+        assert.ok((await launchdBackend.register(job("09:00") as any, opts)).ok);
+        const before = readFileSync(pp, "utf8");
+        assert.equal(lc.calls("bootstrap"), 1);
+        writeFileSync(lc.flag, "1");
+        const r = await launchdBackend.register(job("10:30") as any, opts);
+        assert.equal(r.ok, false);
+        assert.equal(readFileSync(pp, "utf8"), before, "previous plist restored");
+        assert.equal(lc.calls("bootstrap"), 3, "initial + failed attempt + reload of the restored plist");
+        // Brand-new job: nothing to restore, so the plist is removed.
+        const r2 = await launchdBackend.register({ ...job("10:30"), id: "fresh" } as any, opts);
+        assert.equal(r2.ok, false);
+        assert.ok(!existsSync(join(plistDir, "dev.pi.tick.fresh.plist")));
+      });
+    } finally {
+      teardownEnv(env);
+    }
+  });
+});
+
+test("enable of an already-enabled job with a live run skips re-registration; doctor --fix says 'running; retry later'", async () => {
+  await withTempDir(async (dir) => {
+    const plistDir = join(dir, "agents");
+    const env = setupEnv({ dataDir: dir, plistDir });
+    writeStub(env, "node", `echo fake`);
+    const lc = launchctlLogStub(env, dir);
+    try {
+      seedCli(dir);
+      const sink = capture().stream;
+      await withEnv(env, () => cmdAdd(ADD_DAILY("busy", ["--enabled"]), { stdout: sink, stderr: sink }));
+      assert.equal(lc.calls("bootout"), 1);
+      const record = { jobId: "busy", runId: "r1", pid: process.pid, childPid: process.pid, startedAt: new Date().toISOString() };
+      await withEnv(env, async () => {
+        writeActiveRun("busy", record);
+
+        let c = capture();
+        assert.equal(await cmdEnable(["busy"], { stdout: c.stream, stderr: c.stream }), 0);
+        assert.match(c.out.join(""), /already enabled and currently running; not re-registering/);
+        assert.equal(lc.calls("bootout"), 1, "no bootout (would SIGTERM the run)");
+
+        // doctor --fix: break the plist so there is a fixable problem.
+        const pp = join(plistDir, "dev.pi.tick.busy.plist");
+        unlinkSync(pp);
+        c = capture();
+        await cmdDoctor(["--fix"], { stdout: c.stream, stderr: c.stream });
+        assert.match(c.out.join(""), /fix: running; retry later/);
+        assert.ok(!existsSync(pp));
+        assert.equal(lc.calls("bootout"), 1);
+
+        // Once the run is gone, enable re-registers as before.
+        clearActiveRun("busy", "r1");
+        c = capture();
+        assert.equal(await cmdEnable(["busy"], { stdout: c.stream, stderr: c.stream }), 0);
+        assert.match(c.out.join(""), /^enabled job 'busy'/);
+        assert.ok(existsSync(pp));
+        assert.equal(lc.calls("bootout"), 2);
+      });
+    } finally {
+      teardownEnv(env);
+    }
+  });
+});
+
+test("add rejects an id that differs from an existing one only by case (exit 4)", async () => {
+  await withTempDir(async (dir) => {
+    const env = setupEnv({ dataDir: dir, plistDir: join(dir, "agents") });
+    try {
+      const sink = capture().stream;
+      await withEnv(env, async () => {
+        await cmdAdd(ADD_DAILY("Nightly"), { stdout: sink, stderr: sink });
+        await assert.rejects(cmdAdd(ADD_DAILY("nightly"), { stdout: sink, stderr: sink }), (e: any) => e.code === 4 && /conflicts with existing job 'Nightly'/.test(e.message));
+        await assert.rejects(cmdAdd(ADD_DAILY("Nightly"), { stdout: sink, stderr: sink }), (e: any) => e.code === 4 && /already exists/.test(e.message));
+        await cmdAdd(ADD_DAILY("Other"), { stdout: sink, stderr: sink }); // unrelated ids still fine
+      });
+      const cat = JSON.parse(readFileSync(join(dir, "jobs.json"), "utf8"));
+      assert.deepEqual(cat.jobs.map((j: any) => j.id), ["Nightly", "Other"]);
+    } finally {
+      teardownEnv(env);
+    }
+  });
+});
+
+test("enable re-validates cwd and --on-complete (exit 2) instead of registering a job that cannot start", async () => {
+  await withTempDir(async (dir) => {
+    const env = setupEnv({ dataDir: dir, plistDir: join(dir, "agents") });
+    writeStub(env, "node", `echo fake`);
+    const lc = launchctlLogStub(env, dir);
+    try {
+      seedCli(dir);
+      const work = join(dir, "work");
+      mkdirSync(work);
+      const cb = join(dir, "cb.sh");
+      writeFileSync(cb, "#!/bin/sh\n", { mode: 0o755 });
+      const sink = capture().stream;
+      await withEnv(env, async () => {
+        await cmdAdd(["gone", "--prompt", "true", "--agent", "command", "--cwd", work, "--kind", "daily", "--time", "09:00", "--on-complete", cb], { stdout: sink, stderr: sink });
+        unlinkSync(cb);
+        await assert.rejects(cmdEnable(["gone"], { stdout: sink, stderr: sink }), (e: any) => e.code === 2 && /--on-complete/.test(e.message));
+        writeFileSync(cb, "#!/bin/sh\n", { mode: 0o755 });
+        rmSync(work, { recursive: true });
+        await assert.rejects(cmdEnable(["gone"], { stdout: sink, stderr: sink }), (e: any) => e.code === 2 && /cwd does not exist/.test(e.message));
+      });
+      assert.equal(lc.calls("bootstrap"), 0);
+      assert.ok(!existsSync(join(dir, "agents", "dev.pi.tick.gone.plist")));
+      assert.equal(JSON.parse(readFileSync(join(dir, "jobs.json"), "utf8")).jobs[0].enabled, false);
+    } finally {
+      teardownEnv(env);
+    }
+  });
+});
+
+test("enable bakes the documented PI_TICK_* overrides into the plist (XML-escaped) and doctor sees no drift", async () => {
+  await withTempDir(async (dir) => {
+    const plistDir = join(dir, "agents");
+    const env = setupEnv({ dataDir: dir, plistDir });
+    writeStub(env, "node", `echo fake`);
+    launchctlLogStub(env, dir);
+    try {
+      seedCli(dir);
+      const sink = capture().stream;
+      const overrides = { PI_TICK_LOG_RETENTION_DAYS: "3", PI_TICK_LOG_MAX_BYTES: "1234", PI_TICK_RUNS_MAX_BYTES: "5678&<x>" };
+      await withEnv({ ...env, ...overrides }, () => cmdAdd(ADD_DAILY("envy", ["--enabled"]), { stdout: sink, stderr: sink }));
+      const plist = readFileSync(join(plistDir, "dev.pi.tick.envy.plist"), "utf8");
+      for (const [k, v] of [["PI_TICK_LOG_RETENTION_DAYS", "3"], ["PI_TICK_LOG_MAX_BYTES", "1234"], ["PI_TICK_RUNS_MAX_BYTES", "5678&amp;&lt;x&gt;"], ["PI_TICK_DATA_DIR", dir], ["PI_TICK_BACKEND", "launchd"]]) {
+        assert.ok(plist.includes(`<key>${k}</key>\n    <string>${v}</string>`), `${k} missing:\n${plist}`);
+      }
+      // Unset overrides are not invented.
+      assert.ok(!plist.includes("PI_TICK_CRONTAB"));
+      // Doctor (run in a different env) compares stored vs on-disk text: no false drift.
+      const c = capture();
+      assert.equal(await withEnv(env, () => cmdDoctor([], { stdout: c.stream, stderr: c.stream })), 0, c.out.join(""));
     } finally {
       teardownEnv(env);
     }

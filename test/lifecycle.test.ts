@@ -240,8 +240,13 @@ test("stale active record with a mismatched process start time is treated as not
     assert.equal(res.ok, false, "kill refuses a stale record");
     assert.ok(alive(victim.pid!), "the unrelated process was not signalled");
     assert.equal(registry.getActiveRun("stale"), null);
-    // Runner pid recycled -> stale.
+    // Runner pid recycled but the child is verifiably still ours -> an orphaned
+    // (live) run, so kill and the overlap check can still reach it (never
+    // signalled here; covered in bugfix-runner.test.ts).
     write({ pid: process.pid, pidStart: "Mon Jan  1 00:00:00 1990", childPid: victim.pid, childStart: real });
+    assert.equal((registry.getActiveRun("stale") as any)?.orphaned, true);
+    // Runner pid recycled AND child pid recycled -> stale.
+    write({ pid: process.pid, pidStart: "Mon Jan  1 00:00:00 1990", childPid: victim.pid, childStart: "Mon Jan  1 00:00:00 1990" });
     assert.equal(registry.getActiveRun("stale"), null);
     assert.ok(!existsSync(join(tempDir, "active", "stale.json")), "stale file cleaned up");
   } finally { reap(victim.pid); }

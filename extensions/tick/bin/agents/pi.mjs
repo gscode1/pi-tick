@@ -6,12 +6,12 @@ function taskflowPrompt(prompt) {
   const text = String(prompt).trim();
   let name = null;
   let rest = "";
-  const shortcut = text.match(/^\/tf:([^\s]+)(?:\s+(.*))?$/);
+  const shortcut = text.match(/^\/tf:([^\s]+)(?:\s+([\s\S]*))?$/);
   if (shortcut) {
     name = shortcut[1];
     rest = shortcut[2] || "";
   } else {
-    const run = text.match(/^\/tf\s+run\s+([^\s]+)(?:\s+(.*))?$/);
+    const run = text.match(/^\/tf\s+run\s+([^\s]+)(?:\s+([\s\S]*))?$/);
     if (run) {
       name = run[1];
       rest = run[2] || "";
@@ -19,11 +19,21 @@ function taskflowPrompt(prompt) {
   }
   if (!name) return null;
   const args = {};
-  for (const part of rest.split(/\s+/).filter(Boolean)) {
-    const i = part.indexOf("=");
-    if (i > 0) args[part.slice(0, i)] = part.slice(i + 1);
+  // key=value pairs; a value may be "double quoted" (with \" and \\ escapes),
+  // 'single quoted', or a bare run of non-space characters.
+  for (const m of rest.matchAll(/(?<!\S)([^\s=]+)=("(?:[^"\\]|\\.)*"|'[^']*'|\S*)/g)) {
+    const raw = m[2];
+    if (raw.length >= 2 && raw[0] === '"' && raw.endsWith('"')) args[m[1]] = raw.slice(1, -1).replace(/\\(["\\])/g, "$1");
+    else if (raw.length >= 2 && raw[0] === "'" && raw.endsWith("'")) args[m[1]] = raw.slice(1, -1);
+    else args[m[1]] = raw;
   }
   return `Call the taskflow tool exactly once with ${JSON.stringify({ action: "run", name, args })}. Do not call any other tool. Do not inspect files. Return only the taskflow result.`;
+}
+
+// True when the job's prompt is a saved-taskflow invocation (/tf:name or
+// /tf run name), i.e. one whose final text may carry a taskflow failure report.
+export function isTaskflowPrompt(prompt) {
+  return taskflowPrompt(prompt) !== null;
 }
 
 // pi's CLI parser has no `--` end-of-options marker: a positional argument

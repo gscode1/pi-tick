@@ -10,13 +10,12 @@
 // memory.
 
 import { isAbsolute } from "node:path";
-import { statSync, accessSync, constants as fsConstants } from "node:fs";
 import { agentAdapter } from "../agents/index.mjs";
-import { ensureDataDirs, loadCatalog, saveCatalog, findJob, withCatalogLock } from "../catalog.mjs";
+import { ensureDataDirs, loadCatalog, saveCatalog, findJob, findJobIgnoreCase, withCatalogLock } from "../catalog.mjs";
 import { parseFlags, flagString, flagOptionalString, flagOptionalU32 } from "../argv.mjs";
 import { fail } from "../errors.mjs";
 import { PiTickError } from "../catalog.mjs";
-import { validateId, validatePrompt, validateCwd } from "../validate.mjs";
+import { validateId, validatePrompt, validateCwd, validateExecutable } from "../validate.mjs";
 import { buildSchedule, KIND_INTERVAL, KIND_DAILY, KIND_WEEKLY, KIND_ONCE } from "../schedule.mjs";
 import { cmdEnableInternal } from "./enable.mjs";
 
@@ -45,16 +44,15 @@ export function scheduleOptsFromScheduleValue(kind, scheduleValue) {
   return opts;
 }
 
-// The callback only runs after a job fires, so catch a typo or a missing
-// chmod +x at add time instead of in logs/<id>.callback.log hours later.
-function validateExecutable(path) {
-  let st;
-  try { st = statSync(path); } catch {
-    fail(`--on-complete: ${path} does not exist`, 2);
+// Fails when `id` is taken, exactly or differing only by case (macOS APFS is
+// case-insensitive, so such ids would share plist/log/active-run paths).
+function assertIdFree(catalog, id) {
+  if (findJob(catalog, id)) {
+    fail(`job '${id}' already exists; use 'pi-tick delete' first`, 4);
   }
-  if (!st.isFile()) fail(`--on-complete: ${path} is not a file`, 2);
-  try { accessSync(path, fsConstants.X_OK); } catch {
-    fail(`--on-complete: ${path} is not executable`, 2);
+  const clash = findJobIgnoreCase(catalog, id);
+  if (clash) {
+    fail(`job '${id}' conflicts with existing job '${clash.id}' (ids are case-insensitive: they share files on macOS); pick another id`, 4);
   }
 }
 
@@ -99,10 +97,7 @@ export async function createTick(params, { stdout = process.stdout, stderr = pro
   // fast-fail duplicate. We re-check under the lock below.
   ensureDataDirs();
   {
-    const pre = loadCatalog();
-    if (findJob(pre, id)) {
-      fail(`job '${id}' already exists; use 'pi-tick delete' first`, 4);
-    }
+    assertIdFree(loadCatalog(), id);
   }
 
   const now = new Date().toISOString();
@@ -136,9 +131,7 @@ export async function createTick(params, { stdout = process.stdout, stderr = pro
     const catalog = loadCatalog();
     // Re-check under the lock: another process may have raced between
     // the pre-check and the wrap.
-    if (findJob(catalog, id)) {
-      fail(`job '${id}' already exists; use 'pi-tick delete' first`, 4);
-    }
+    assertIdFree(catalog, id);
     catalog.jobs.push(job);
     saveCatalog(catalog);
   });

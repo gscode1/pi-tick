@@ -234,17 +234,32 @@ export const launchdBackend = {
       cliPath: opts.cliPath,
       logsDir: opts.logsDir,
       envPath: opts.envPath,
+      envVars: opts.envVars,
     });
     mkdirSync(plistDir(), { recursive: true });
-    writeFileSync(plistPath(job.id), plist, { encoding: "utf8" });
+    const pp = plistPath(job.id);
+    // Remember the plist we are replacing so a failed bootstrap can put it
+    // back instead of leaving an enabled job with no plist and no service.
+    let previous = null;
+    try { previous = readFileSync(pp, "utf8"); } catch { /* none yet */ }
+    writeFileSync(pp, plist, { encoding: "utf8" });
     const registeredFingerprint = fingerprint(plist);
-    chmodSync(plistPath(job.id), 0o644);
+    chmodSync(pp, 0o644);
 
     // Idempotent re-registration: always bootout first, ignore errors.
     bootout(job.id);
     const boot = bootstrap(job.id);
     if (!boot.ok) {
-      try { unlinkSync(plistPath(job.id)); } catch { /* already gone */ }
+      if (previous === null) {
+        try { unlinkSync(pp); } catch { /* already gone */ }
+      } else {
+        // Best effort: restore the old plist and load it again.
+        try {
+          writeFileSync(pp, previous, { encoding: "utf8" });
+          chmodSync(pp, 0o644);
+          bootstrap(job.id);
+        } catch { /* nothing more we can do */ }
+      }
       return { ok: false, error: `launchctl bootstrap failed: ${boot.stderr.trim() || "unknown error"}` };
     }
     return { ok: true, referencePath: plistPath(job.id), fingerprint: registeredFingerprint };

@@ -48,7 +48,7 @@ function seedStableCli(env: TestEnv) {
 
 // ─── Pure helper: buildCronLine ────────────────────────────────────────
 
-import { cronBackend, buildCronLine } from "../extensions/tick/bin/backends/cron.mjs";
+import { cronBackend, buildCronLine, parseCronPaths } from "../extensions/tick/bin/backends/cron.mjs";
 
 const FAKE_LOGS = "/tmp/fake-logs";
 const FAKE_NODE = "/usr/bin/node";
@@ -841,4 +841,156 @@ test("cronBackend.unregister keeps a user line when pi-tick's command line was e
       }
     });
   }
+});
+
+// ─── unregister / marker matching / locking / env / delete ──────────────
+
+// A crontab stub that keeps the crontab in `file`, counts writes in
+// `file.writes`, and (optionally) sleeps before applying a write so racing
+// read-modify-writes overlap.
+function makeCountingCrontabStub(env: TestEnv, file: string, writeDelay = "0") {
+  return writeStub(env, "crontab", `f=${shellQuote(file)}
+case "$1" in
+  -l) if [ -f "$f" ]; then cat "$f"; exit 0; fi; echo "no crontab for x" >&2; exit 1 ;;
+  -) cat > "$f.in"; sleep ${writeDelay}; mv "$f.in" "$f"; echo w >> "$f.writes" ;;
+  *) exit 2 ;;
+esac`);
+}
+const writeCount = (file: string) => (existsSync(file + ".writes") ? readFileSync(file + ".writes", "utf8").split("\n").filter(Boolean).length : 0);
+const DAILY_JOB = (id: string) => ({ id, cwd: "/tmp", schedule: { kind: "daily", value: { time: "09:00" } } });
+const COPTS = (dir: string) => ({ nodePath: FAKE_NODE, cliPath: FAKE_CLI, logsDir: () => join(dir, "logs") });
+
+test("cronBackend.unregister rewrites nothing when no entry of ours exists", async () => {
+  await withTempDir(async (dir) => {
+    const file = join(dir, "crontab.txt");
+    // Hand-written crontab with no blank-line tidiness the rewrite would change.
+    writeFileSync(file, "MAILTO=me\n\n\n0 1 * * * /usr/bin/true\n", "utf8");
+    const env = setupEnv({ dataDir: join(dir, "data"), plistDir: join(dir, "agents") });
+    makeCountingCrontabStub(env, file);
+    try {
+      await withEnv({ ...env, ...BACKEND_ENV }, async () => {
+        const r = await cronBackend.unregister("ghost");
+        assert.ok(r.ok);
+        assert.equal(writeCount(file), 0, "crontab must not be rewritten");
+        assert.equal(readFileSync(file, "utf8"), "MAILTO=me\n\n\n0 1 * * * /usr/bin/true\n");
+        // An entry that exists is still removed (one write).
+        assert.ok((await cronBackend.register(DAILY_JOB("real") as any, COPTS(dir))).ok);
+        assert.equal(writeCount(file), 1);
+        assert.ok((await cronBackend.unregister("real")).ok);
+        assert.equal(writeCount(file), 2);
+        assert.ok(!readFileSync(file, "utf8").includes("pi-tick"));
+      });
+    } finally {
+      teardownEnv(env);
+    }
+  });
+});
+
+test("cron marker with trailing whitespace/CR is still found: register does not duplicate, status and unregister see it", async () => {
+  await withTempDir(async (dir) => {
+    const file = join(dir, "crontab.txt");
+    const env = setupEnv({ dataDir: join(dir, "data"), plistDir: join(dir, "agents") });
+    makeCountingCrontabStub(env, file);
+    try {
+      await withEnv({ ...env, ...BACKEND_ENV }, async () => {
+        const built = buildCronLine(DAILY_JOB("edited") as any, COPTS(dir)).line;
+        writeFileSync(file, `# pi-tick: edited \r\n${built}\n`, "utf8");
+        assert.equal(cronBackend.status("edited").registered, true);
+        assert.ok((await cronBackend.register(DAILY_JOB("edited") as any, COPTS(dir))).ok);
+        const text = readFileSync(file, "utf8");
+        assert.equal(text.split("\n").filter((l) => l.includes("run 'edited'")).length, 1, `duplicated entry:\n${text}`);
+        assert.equal(text.split("\n").filter((l) => l.startsWith("# pi-tick:")).length, 1);
+        // Same for removal of a hand-padded marker.
+        writeFileSync(file, `# pi-tick: edited  \n${built}\n`, "utf8");
+        assert.ok((await cronBackend.unregister("edited")).ok);
+        assert.equal(readFileSync(file, "utf8").trim(), "");
+      });
+    } finally {
+      teardownEnv(env);
+    }
+  });
+});
+
+test("cron register/unregister are serialized: concurrent registers keep every entry", async () => {
+  await withTempDir(async (dir) => {
+    const file = join(dir, "crontab.txt");
+    writeFileSync(file, "", "utf8");
+    const env = setupEnv({ dataDir: join(dir, "data"), plistDir: join(dir, "agents") });
+    makeCountingCrontabStub(env, file, "0.2");
+    try {
+      await withEnv({ ...env, ...BACKEND_ENV }, async () => {
+        const ids = ["a1", "b2", "c3"];
+        const rs = await Promise.all(ids.map((id) => cronBackend.register(DAILY_JOB(id) as any, COPTS(dir))));
+        assert.ok(rs.every((r) => r.ok), JSON.stringify(rs));
+        assert.deepEqual((await cronBackend.listRegistered()).sort(), ids);
+        assert.ok(!existsSync(join(dir, "data", "crontab.lock")), "lock released");
+      });
+    } finally {
+      teardownEnv(env);
+    }
+  });
+});
+
+test("cron: PI_TICK_* env vars are prefixed on the line (quoted, % escaped) and parseCronPaths skips them", () => {
+  const { line } = buildCronLine(DAILY_JOB("envjob") as any, {
+    nodePath: FAKE_NODE,
+    cliPath: FAKE_CLI,
+    logsDir: FAKE_LOGS,
+    envVars: { PI_TICK_DATA_DIR: "/data/it's 50%", PI_TICK_LOG_MAX_BYTES: "1234", PI_TICK_EMPTY: "", PI_TICK_NL: "a\nb" },
+  });
+  assert.ok(line!.includes(`PI_TICK_DATA_DIR='/data/it'\\''s 50\\%' PI_TICK_LOG_MAX_BYTES='1234' '${FAKE_NODE}' '${FAKE_CLI}' run 'envjob'`), line);
+  assert.ok(!line!.includes("PI_TICK_EMPTY") && !line!.includes("PI_TICK_NL"));
+  assert.equal(line!.match(/(?<!\\)%/g), null);
+  assert.deepEqual(parseCronPaths(line!), { nodePath: FAKE_NODE, cliPath: FAKE_CLI, cwd: null });
+});
+
+test("enable on cron bakes the PI_TICK_* overrides into the crontab line", async () => {
+  await withTempDir(async (dir) => {
+    const file = join(dir, "crontab.txt");
+    const data = join(dir, "data");
+    const env = setupEnv({ dataDir: data, plistDir: join(dir, "agents") });
+    makeCountingCrontabStub(env, file);
+    writeStub(env, "node", "echo fake");
+    seedStableCli(env);
+    try {
+      const sink = { write: () => true } as any;
+      await withEnv({ ...env, ...BACKEND_ENV, PI_TICK_LOG_RETENTION_DAYS: "9" }, async () => {
+        await cmdAdd(["envc", "--prompt", "true", "--agent", "command", "--cwd", "/tmp", "--kind", "daily", "--time", "09:00", "--enabled"], { stdout: sink, stderr: sink });
+      });
+      const line = readFileSync(file, "utf8").split("\n").find((l) => l.includes("run 'envc'"))!;
+      assert.ok(line.includes("PI_TICK_LOG_RETENTION_DAYS='9'"), line);
+      assert.ok(line.includes(`PI_TICK_DATA_DIR='${data}'`), line);
+      assert.ok(line.includes("PI_TICK_BACKEND='cron'"), line);
+      assert.equal(cronBackend.status.length, 1);
+      await withEnv({ ...env, ...BACKEND_ENV }, () => {
+        const st = cronBackend.status("envc");
+        assert.equal(st.registered, true);
+        assert.equal(st.paths.cliPath, join(data, "pi-tick.mjs"));
+      });
+    } finally {
+      teardownEnv(env);
+    }
+  });
+});
+
+test("delete on cron removes a leftover crontab entry of a catalog-disabled job", async () => {
+  await withTempDir(async (dir) => {
+    const file = join(dir, "crontab.txt");
+    const env = setupEnv({ dataDir: join(dir, "data"), plistDir: join(dir, "agents") });
+    makeCountingCrontabStub(env, file);
+    try {
+      const sink = { write: () => true } as any;
+      await withEnv({ ...env, ...BACKEND_ENV }, async () => {
+        await cmdAdd(["left", "--prompt", "true", "--agent", "command", "--cwd", "/tmp", "--kind", "daily", "--time", "09:00"], { stdout: sink, stderr: sink });
+        // Catalog says disabled, but the crontab still holds the entry (failed self-unregister).
+        assert.ok((await cronBackend.register(DAILY_JOB("left") as any, COPTS(dir))).ok);
+        assert.equal(cronBackend.status("left").registered, true);
+        assert.equal(await cmdDelete(["left"], { stdout: sink, stderr: sink }), 0);
+        assert.equal(cronBackend.status("left").registered, false);
+        assert.ok(!readFileSync(file, "utf8").includes("pi-tick: left"));
+      });
+    } finally {
+      teardownEnv(env);
+    }
+  });
 });

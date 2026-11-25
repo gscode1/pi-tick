@@ -156,6 +156,9 @@ async function fixJob(result) {
   if (blocking.length > 0) {
     return `not re-registered: ${blocking.map((p) => p.message).join("; ")}`;
   }
+  // Re-registering bootouts the service under launchd, which would SIGTERM the
+  // in-flight run.
+  if (getActiveRun(result.id)) return "running; retry later";
   const sink = { write: () => true };
   try {
     await cmdEnableInternal(result.id, { stdout: sink, stderr: sink });

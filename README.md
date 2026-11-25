@@ -59,7 +59,7 @@ pi-tick add nightly-recap \
   --kind daily --time 02:00
 
 # 2. Test it once via the runner (manual trigger)
-pi-tick run nightly-recap
+pi-tick run nightly-recap --manual
 
 # 3. Enable the schedule (registers a launchd plist)
 pi-tick enable nightly-recap
@@ -82,7 +82,7 @@ pi-tick delete nightly-recap
 | `pi-tick add <id> ...` | Create a job in the catalog. **Disabled by default** — pass `--enabled` to also register a launchd plist. |
 | `pi-tick list [--json]` | Print all jobs as a table (or JSON). An enabled job shows `stale` or `overdue` instead of `scheduled` when `doctor` would flag it. |
 | `pi-tick delete <id>` | Remove a job (also unloads its plist if enabled). |
-| `pi-tick enable <id>` | Register / re-register the launchd plist. Idempotent. |
+| `pi-tick enable <id>` | Register / re-register the launchd plist. Idempotent; skips re-registering a job that is currently running. |
 | `pi-tick disable <id>` | Unload the plist and rename it to `.plist.disabled`. |
 | `pi-tick run <id> [--manual]` | Fire a job. With `--manual` it runs even if the job is disabled; without it (scheduler path) disabled jobs are skipped with exit 0. Only one run per job at a time: a start while the job is already running is refused (exit 5 with `--manual`, exit 0 from the scheduler). SIGTERM/SIGINT to the runner kills pi's process tree and records the run as `terminated` (exit 143). |
 | `pi-tick kill <id> [--grace-ms N]` | Terminate a running job's process group: SIGTERM, then SIGKILL after the grace period (default 5s). The run is recorded as `killed` (exit 143). |
@@ -101,7 +101,7 @@ Flags for `add`:
 - `--kind interval|daily|weekly|once` — required
 - `--minutes N --seconds N` — for `interval` (min total 5s; see "Interval support" below)
 - `--offset-minutes N --offset-seconds N` — optional phase for `interval` (see "Interval support")
-- `--at ISO-8601` — for `once`; absolute future timestamp with `:00` seconds and no fractional milliseconds
+- `--at ISO-8601` — for `once`; absolute future timestamp with `:00` seconds (an optional `.000` is accepted; other fractional seconds are not)
 - `--time HH:MM` — for `daily` and `weekly` (24h)
 - `--days mon,wed,fri` — for `weekly` (comma-separated, case-insensitive)
 - `--model <id>` — optional, passed to `pi` as `--model` (rejected for command jobs)
@@ -199,7 +199,7 @@ attention.
 
 | Command | Purpose |
 |---|---|
-| `/tick list` | Show all jobs (markdown table). |
+| `/tick list` | Show all jobs (plain-text table). |
 | `/tick run <id>` | Fire a job manually, even if disabled. The `RunRecord` is marked `triggerKind: "manual"`. |
 | `/tick kill <id>` | Terminate a running job's process tree. |
 | `/tick enable <id>` | Register the job with the active backend (launchd/cron) so it starts firing. |
@@ -403,7 +403,10 @@ still create-and-enable in one call by passing `enabled: true` to
 **Log retention:** each per-job log file (`.out.log`, `.err.log`,
 `.callback.log`) is deleted once older than 7 days, and rotated to `<file>.1`
 when larger than 50 MB. Override with `PI_TICK_LOG_RETENTION_DAYS` and
-`PI_TICK_LOG_MAX_BYTES`.
+`PI_TICK_LOG_MAX_BYTES`. `PI_TICK_*` overrides set when you run `enable`
+(`PI_TICK_DATA_DIR`, `PI_TICK_LOG_*`, `PI_TICK_RUNS_MAX_BYTES`, …) are baked
+into the plist / crontab line, so scheduled runs see them; re-run `enable`
+after changing them.
 
 ### `jobs.json`
 
@@ -467,7 +470,7 @@ One JSON object per line, append-only:
 {"runId":"7c8a1234","jobId":"nightly-recap","triggerKind":"external","startedAt":"2026-06-15T02:00:04.123Z","finishedAt":"2026-06-15T02:00:47.890Z","exitCode":0,"reason":"exit_code","error":null,"model":"claude-sonnet-4-5","tokens":{"input":1234,"output":567},"transcriptPath":"/Users/me/.pi/agent/tick/runs/nightly-recap/2026-06-15T02-00-04-123Z_7c8a1234.jsonl","transcriptBytes":12083,"finalTextPreview":"Done. Wrote .scratch/recap.md."}
 ```
 
-- `triggerKind` — `"external"` (launchd/cron) or `"manual"` (`/tick run` or `pi-tick run`).
+- `triggerKind` — `"external"` (launchd/cron) or `"manual"` (`/tick run` or `pi-tick run --manual`; `pi-tick run` without `--manual` is `"external"`).
 - `reason` — why the run ended: `exit_code`, `signal`, `spawn_error`,
   `model_error`, `taskflow_failed`, `timeout`, `idle_timeout`, `killed`,
   `terminated`, `output_cap`, or `once_missed`. `error` holds the
