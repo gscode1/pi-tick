@@ -628,7 +628,26 @@ async function finalizeIsolation(job, iso, record, { runId, stderr }) {
   }
 }
 
+// Keeps the runner-level termination handlers installed for the whole of a
+// run. Each phase (guard, isolation, agent) registers its own handle, but
+// removes it when it ends; between two phases (and between spawning the agent
+// and registering its handle, which waits on synchronous `ps` calls) no handle
+// would exist, handlers would be uninstalled, and a SIGTERM landing there
+// would kill the runner by the default action instead of recording the run as
+// `terminated`. The hold never delays exit itself: the phase handles do that.
 export async function runJob(job, trigger, options) {
+  const hold = { terminate() {}, finished: Promise.resolve() };
+  liveRuns.add(hold);
+  syncSignalHandlers();
+  try {
+    return await runJobInner(job, trigger, options);
+  } finally {
+    liveRuns.delete(hold);
+    syncSignalHandlers();
+  }
+}
+
+async function runJobInner(job, trigger, options) {
   const { piPath, transcriptsDir, logsDir, spawnFn = spawn, stderr = process.stderr, envPath, defaultModel } = options;
   const drainMs = Number.isFinite(options.drainMs) ? options.drainMs : STREAM_DRAIN_MS;
 

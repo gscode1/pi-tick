@@ -749,7 +749,7 @@ Tests use Node's built-in `node:test` runner and run against pi 1.6
 The launchctl and `pi` calls are stubbed via PATH overrides; the test
 suite does not touch the user's real data dir or LaunchAgents.
 
-The current suite has **532 tests** across the CLI, catalog, extension,
+The current suite has **533 tests** across the CLI, catalog, extension,
 backends, runner, and transcript behavior (the macOS-only launchd smoke test
 is run separately via `npm run test:macos`).
 

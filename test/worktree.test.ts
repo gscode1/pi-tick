@@ -211,6 +211,25 @@ test("isolate: SIGTERM to a standalone `pi-tick run` still finalizes (branch, re
   assert.deepEqual(worktreesOf(dir, "term"), []);
 });
 
+test("isolate: SIGTERM during --setup exits 143, records setup_failed, removes the worktree and never starts the agent", async () => {
+  const { dir, repo } = setup();
+  const ready = join(dir, "setup-ready");
+  await add(repo, "termsetup", `touch ${join(dir, "agent-ran")}`, { setup: `touch ${ready}; sleep 30` });
+  const cli = new URL("../extensions/tick/bin/pi-tick.mjs", import.meta.url).pathname;
+  const proc = spawn(process.execPath, [cli, "run", "termsetup", "--manual"], { env: { ...process.env, PI_TICK_DATA_DIR: dir }, stdio: "ignore" });
+  const exited = new Promise<number | null>((res) => proc.on("exit", (c, s) => res(c ?? (s ? 128 : null))));
+  for (let i = 0; i < 300 && !existsSync(ready); i++) await sleep(50);
+  assert.ok(existsSync(ready), "setup started");
+  proc.kill("SIGTERM");
+  assert.equal(await Promise.race([exited, sleep(20_000).then(() => "hang")]), 143);
+  const rec = runs(dir).filter((r) => r.jobId === "termsetup").pop();
+  assert.equal(rec.reason, "setup_failed");
+  assert.equal(rec.error, "setup terminated");
+  assert.equal(existsSync(join(dir, "agent-ran")), false);
+  assert.deepEqual(worktreesOf(dir, "termsetup"), []);
+  assert.equal(existsSync(join(dir, "active", "termsetup.json")), false);
+});
+
 test("isolate: a guard skip creates no worktree; a guard that passes runs first, in the job's cwd", async () => {
   const { dir, repo, options } = setup();
   const skip = await add(repo, "skipper", `touch ran`, { when: "exit 1" });
