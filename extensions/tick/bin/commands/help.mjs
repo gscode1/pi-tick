@@ -15,15 +15,16 @@ Usage:
                    [--offset-minutes N] [--offset-seconds N] \\
                    [--time HH:MM] [--days mon,wed,fri] \\
                    [--agent pi|command] [--model <id>] [--on-complete <abs path>] [--enabled] \\
+                   [--when "<shell cmd>"] [--when-timeout SECONDS] \\
                    [--timeout-ms N] [--idle-timeout-ms N] \\
                    [--max-output-bytes N] [--kill-grace-ms N]
   pi-tick list [--json]
   pi-tick delete <id>
   pi-tick enable <id>
   pi-tick disable <id>
-  pi-tick run <id> [--manual]   (--manual runs even if disabled)
+  pi-tick run <id> [--manual [--no-when]]   (--manual runs even if disabled)
   pi-tick kill <id> [--grace-ms N]
-  pi-tick log [id] [--limit N] [--failed] [--since <dur>]
+  pi-tick log [id] [--limit N] [--failed] [--since <dur>] [--all]
   pi-tick transcripts <id> [--limit N]
   pi-tick show <id> [--run N|--run-id <id>] [--tail M] [--raw] [--no-meta]
   pi-tick config <set|get|unset> <key> [value]
@@ -41,6 +42,14 @@ exit code decides success and the last stdout line is the run summary.
 
 --on-complete runs an executable after each run is recorded, with the run
 record as JSON on stdin (30s limit). Output: logs/<id>.callback.log.
+
+--when runs a shell command (cwd = the job's, 60s limit, or --when-timeout)
+before each fire: exit 0 runs the agent, exit 1 records the run as
+"skipped" (no agent, no tokens), any other exit, a signal or a timeout
+records "guard_failed". The guard's stdout (64 KiB cap) replaces
+{{when.stdout}} in a pi prompt, and is in $PI_TICK_WHEN_STDOUT for command
+jobs and --on-complete. "run --manual" runs the guard; --no-when bypasses it.
+"log" hides skipped runs unless --all.
 
   pi-tick doctor        # find enabled jobs that silently stopped: missing or
                         # changed scheduler entry, node/pi/cwd/--on-complete

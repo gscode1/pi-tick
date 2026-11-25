@@ -38,6 +38,12 @@ export function cmdShow(argv, { stdout = process.stdout, stderr = process.stderr
   const rawMode = flags.raw === true || flags.raw === "true";
   const noMeta = flags["no-meta"] === true || flags["no-meta"] === "true";
 
+  if (!noMeta && !rawMode) {
+    let guarded = null;
+    try { guarded = findJob(loadCatalog(), id); } catch { /* no catalog: nothing to show */ }
+    if (guarded?.when) stdout.write(`guard (--when): ${guarded.when}${guarded.whenTimeout ? ` (timeout ${guarded.whenTimeout}s)` : ""}\n`);
+  }
+
   const files = listTranscriptFiles(id).sort(compareNewestFirst);
   if (files.length === 0) {
     stdout.write(`(no transcripts for job '${id}')\n`);

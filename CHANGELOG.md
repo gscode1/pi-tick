@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `pi-tick add --when '<shell cmd>' [--when-timeout SECONDS]`: a guard that runs before each fire (cwd = the job's, 60s default limit). Exit 0 runs the agent; exit 1 records the run as `skipped` (no agent, no transcript, no `--on-complete`); any other exit, a signal, a spawn error or a timeout records `guard_failed`. The guard's stdout (64 KiB cap) replaces `{{when.stdout}}` in a pi prompt as literal text, and is in `PI_TICK_WHEN_STDOUT` for command jobs and `--on-complete`. CLI-only (#66).
+- `pi-tick run --manual` runs the guard; `--no-when` bypasses it.
+- `pi-tick log` hides `skipped` runs by default with a count of how many; `--all` shows them.
+- `doctor` reports a job whose last run was `guard_failed` as `failing`; `skipped` and `guard_failed` count as fires, so guarded jobs are not flagged `overdue`. `pi-tick show` prints a job's guard.
 - `pi-tick doctor [id] [--fix] [--json]` finds enabled jobs that silently stopped firing: a missing, unloaded or changed launchd/cron entry, a baked node, CLI, pi, `cwd` or `--on-complete` path that no longer exists (e.g. after an nvm or mise node upgrade), a missed expected fire, or a failing last run. `--fix` re-registers the repairable ones with freshly resolved paths. Also `/tick doctor` (#61).
 - `pi-tick list` shows `stale` or `overdue` for enabled jobs doctor would flag.
 - On `session_start`, the extension shows one notice when tick jobs need attention.

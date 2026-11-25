@@ -84,9 +84,9 @@ pi-tick delete nightly-recap
 | `pi-tick delete <id>` | Remove a job (also unloads its plist if enabled). |
 | `pi-tick enable <id>` | Register / re-register the launchd plist. Idempotent; skips re-registering a job that is currently running. |
 | `pi-tick disable <id>` | Unload the plist and rename it to `.plist.disabled`. |
-| `pi-tick run <id> [--manual]` | Fire a job. With `--manual` it runs even if the job is disabled; without it (scheduler path) disabled jobs are skipped with exit 0. Only one run per job at a time: a start while the job is already running is refused (exit 5 with `--manual`, exit 0 from the scheduler). SIGTERM/SIGINT to the runner kills pi's process tree and records the run as `terminated` (exit 143). |
+| `pi-tick run <id> [--manual [--no-when]]` | Fire a job. With `--manual` it runs even if the job is disabled (and runs its `--when` guard; `--no-when` bypasses it); without it (scheduler path) disabled jobs are skipped with exit 0. Only one run per job at a time: a start while the job is already running is refused (exit 5 with `--manual`, exit 0 from the scheduler). SIGTERM/SIGINT to the runner kills pi's process tree and records the run as `terminated` (exit 143). |
 | `pi-tick kill <id> [--grace-ms N]` | Terminate a running job's process group: SIGTERM, then SIGKILL after the grace period (default 5s). The run is recorded as `killed` (exit 143). |
-| `pi-tick log [id] [--limit N] [--failed] [--since <dur>]` | Tail the run log. `--failed` keeps only non-zero exits; `--since` keeps runs in the last `<dur>` (`30s`/`5m`/`2h`/`1d`). |
+| `pi-tick log [id] [--limit N] [--failed] [--since <dur>] [--all]` | Tail the run log. `--failed` keeps only non-zero exits; `--since` keeps runs in the last `<dur>` (`30s`/`5m`/`2h`/`1d`). `skipped` runs (a `--when` guard found nothing to do) are hidden, with a count; `--all` shows them. |
 | `pi-tick transcripts <id> [--limit N]` | List transcript files for a job, newest first. |
 | `pi-tick show <id> [--run N\|--run-id <id>] [--tail M] [--raw] [--no-meta]` | Chat-style view of a transcript (default: latest). `--run N` picks the Nth most recent; `--run-id` picks a run shown by `pi-tick log`. `--tail M` keeps the last M assistant turns. `--raw` emits JSONL events, one per line (`event:` prefix for `jq` pipelines). `--no-meta` skips the run header. |
 | `pi-tick config <set\|get\|unset> <key> [value]` | Read or write tick-scoped config. Today: `default-model` (see below). |
@@ -107,6 +107,8 @@ Flags for `add`:
 - `--model <id>` — optional, passed to `pi` as `--model` (rejected for command jobs)
 - `--agent pi|command` — optional, default `pi`; see [Command jobs](#command-jobs---agent-command). CLI-only.
 - `--on-complete <abs path>` — optional executable run after each run; see [Completion hook](#completion-hook---on-complete). CLI-only.
+- `--when "<shell cmd>"` — optional guard run before each fire; see [Guard commands](#guard-commands---when). CLI-only.
+- `--when-timeout SECONDS` — optional, with `--when`; default 60.
 - `--enabled` — also register the schedule (launchd plist / crontab entry) in the same call
 
 Runtime limits (all optional, in ms/bytes; `0` disables where allowed):
@@ -177,6 +179,55 @@ executable after every run of the job, in the job's cwd, with the run record
 
 Like command jobs, it is CLI-only: `tick_create` has no field for it.
 
+### Guard commands (`--when`)
+
+Many scheduled runs have nothing to do. `--when` adds a cheap shell check
+that runs before the agent, so an idle tick costs no `pi` spawn and no tokens:
+
+```sh
+pi-tick add triage \
+  --when 'out=$(gh issue list --label new --json number,title -q ".[] | \"#\(.number) \(.title)\""); [ -n "$out" ] && echo "$out"' \
+  --prompt "Triage these issues: {{when.stdout}}" \
+  --cwd ~/code/app --kind interval --minutes 5 --enabled
+```
+
+The guard must signal "nothing to do" with its exit status: here `[ -n "$out" ]`
+fails on an empty list, so `echo` is not reached and the guard exits 1. Before
+each fire the runner runs the command with `/bin/sh -c` in the job's
+cwd (60s limit; `--when-timeout SECONDS` changes it). Its exit status decides:
+
+| Guard exit | Run recorded as | Agent |
+|---|---|---|
+| `0` | normal run | spawned; the guard's stdout is available to it |
+| `1` | `skipped` (exit code 0) | not spawned, no transcript, no `--on-complete` |
+| anything else, a signal, a failure to start, or the timeout | `guard_failed` (exit code 1, with the reason in `error`) | not spawned, no `--on-complete` |
+
+Using the guard's stdout:
+
+- In a pi prompt, `{{when.stdout}}` is replaced by the stdout (trailing
+  newline trimmed). It is inserted as literal text and not expanded again, so
+  stdout containing `{{...}}` is safe. A prompt of a job with no guard (or run
+  with `--no-when`) gets an empty string.
+- For `--agent command` jobs and `--on-complete`, stdout is never pasted into
+  command text. It is in the environment as `PI_TICK_WHEN_STDOUT`.
+- stdout is capped at 64 KiB (a marker line is appended when it is cut); only
+  a short stderr tail is kept, in `error` of a `guard_failed` record.
+
+Other behavior:
+
+- `pi-tick run <id> --manual` runs the guard too; `--no-when` runs the agent
+  anyway (`{{when.stdout}}` is empty). `--no-when` requires `--manual`.
+- While the guard runs the job counts as running: an overlapping tick is
+  refused and `pi-tick kill` stops the guard.
+- A `skipped` or `guard_failed` run is a fire as far as `list` and `doctor`
+  are concerned, so a guarded job that is mostly idle is not reported as
+  `overdue`. `doctor` does report a job whose last run was `guard_failed`
+  (`failing`), since its agent never runs.
+- `pi-tick log` hides `skipped` rows by default (`--all` shows them);
+  `guard_failed` rows are always shown. `pi-tick show` prints the guard.
+- Like `--agent command` and `--on-complete`, it is CLI-only: `tick_create`
+  has no field for it.
+
 ### Silent-stop detection (`doctor`)
 
 `enable` bakes absolute paths into the scheduler entry, so a node upgrade via
@@ -187,7 +238,7 @@ without any error. `pi-tick doctor` checks every enabled job (or one `id`):
 |---|---|
 | `stale` | The launchd/cron entry is missing, not loaded, differs from what `enable` registered, or a baked path is gone: node, the stable CLI, pi, `cwd`, `--on-complete`. |
 | `overdue` | The last run started before the previous expected fire. Calendar jobs get 10 minutes of grace; interval jobs tolerate one missed fire; plain launchd `StartInterval` jobs (no fixed phase) are overdue after two intervals plus 5 minutes. cron does not catch up after sleep, so a fire missed while asleep shows as `overdue`. |
-| `failing` | The last run failed. |
+| `failing` | The last run failed, including a `guard_failed` run (its `--when` guard crashed or timed out). A `skipped` run is healthy. |
 
 `--fix` re-runs `enable` for jobs a fresh registration can repair (missing,
 unloaded or changed entry, missing node or pi): it re-resolves node and pi
@@ -219,8 +270,9 @@ Argument completion works for all of these.
 | `tick_list` | — | The catalog as a JSON array. |
 | `tick_delete` | `jobId` | Confirmation. |
 
-`tick_create` always creates pi jobs: `agent` and `onComplete` are CLI-only,
-so a model can neither schedule a shell command nor attach a hook.
+`tick_create` always creates pi jobs: `agent`, `onComplete` and `when` are
+CLI-only, so a model can neither schedule a shell command nor attach a hook
+or a guard.
 
 The LLM can create-and-enable in one call by passing `enabled: true` to
 `tick_create`. It cannot enable or disable existing jobs — to do that, the
@@ -454,6 +506,8 @@ after changing them.
   `doctor` existed have none; re-enable them to record one.
 - `agent` — optional; `"command"` for command jobs. Absent means pi.
 - `onComplete` — optional; absolute path of the `--on-complete` executable.
+- `when`, `whenTimeout` — optional; the `--when` guard command and its limit
+  in seconds (absent means 60).
 - `timeoutMs`, `idleTimeoutMs`, `maxOutputBytes`, `killGraceMs` — runtime
   limits; `null` means the runner's default.
 - `lastRun` — written by the runner; `null` until first run. Carries the
@@ -473,8 +527,10 @@ One JSON object per line, append-only:
 - `triggerKind` — `"external"` (launchd/cron) or `"manual"` (`/tick run` or `pi-tick run --manual`; `pi-tick run` without `--manual` is `"external"`).
 - `reason` — why the run ended: `exit_code`, `signal`, `spawn_error`,
   `model_error`, `taskflow_failed`, `timeout`, `idle_timeout`, `killed`,
-  `terminated`, `output_cap`, or `once_missed`. `error` holds the
-  message (≤ 200 chars) when `exitCode` is non-zero.
+  `terminated`, `output_cap`, `once_missed`, `skipped` or `guard_failed`
+  (the last two come from a `--when` guard: `skipped` has exit code 0 and no
+  transcript). `error` holds the message (≤ 200 chars) when `exitCode` is
+  non-zero.
 - `agent` — present only for non-pi jobs (`"command"`).
 - A pi run counts as failed (`model_error`) when pi exits 0 but the last
   assistant message stopped with `error`, `aborted` or `toolUse`. With pi
@@ -566,7 +622,7 @@ Tests use Node's built-in `node:test` runner and run against pi 1.6
 The launchctl and `pi` calls are stubbed via PATH overrides; the test
 suite does not touch the user's real data dir or LaunchAgents.
 
-The current suite has **453 tests** across the CLI, catalog, extension,
+The current suite has **505 tests** across the CLI, catalog, extension,
 backends, runner, and transcript behavior (the macOS-only launchd smoke test
 is run separately via `npm run test:macos`).
 

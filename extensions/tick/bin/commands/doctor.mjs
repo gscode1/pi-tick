@@ -4,7 +4,9 @@
 // is gone, not loaded, or no longer what `enable` wrote; a path baked into
 // it (node, the stable CLI, pi, cwd, --on-complete) no longer exists, e.g.
 // after an nvm/mise node upgrade; or the last run is older than the
-// previous expected fire. `--fix` re-registers jobs whose problems a fresh
+// previous expected fire; or the `--when` guard's last run failed
+// (`guard_failed`: the guard crashed or timed out, so the agent never runs).
+// A `skipped` run (guard exit 1) is a healthy fire. `--fix` re-registers jobs whose problems a fresh
 // `enable` can repair (it re-resolves node and pi).
 //
 // diagnoseJob is also used by `list` (stale/overdue status) and by the
@@ -125,7 +127,9 @@ export function diagnoseJob(job, { backend = activeBackend(), now = new Date(), 
   if (!isRunning) {
     const od = overdueProblem(job, now);
     if (od) problems.push(od);
-    if (job.lastRun && job.lastRun.exitCode !== 0) {
+    if (job.lastRun?.reason === "guard_failed") {
+      problems.push(problem("guard-failed", `guard (--when) failed: ${job.lastRun.error || "unknown error"}; the agent did not run`, { severity: "failing" }));
+    } else if (job.lastRun && job.lastRun.exitCode !== 0) {
       const why = job.lastRun.reason || job.lastRun.error || `exit ${job.lastRun.exitCode}`;
       problems.push(problem("failing", `last run failed: ${why}`, { severity: "failing" }));
     }
