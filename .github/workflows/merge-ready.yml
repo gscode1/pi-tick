@@ -28,7 +28,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      # --auto: merges once the required check (audit) passes; branch protection on main requires it.
+      # --auto: merges once the required checks pass; branch protection on main requires them.
       # --match-head-commit: a commit pushed after the label was added is not merged.
       - name: Merge
         env:
